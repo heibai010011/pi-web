@@ -2534,8 +2534,29 @@ function SessionItem({
   const [deleting, setDeleting] = useState(false);
   const [folderMenuCreating, setFolderMenuCreating] = useState(false);
   const [folderMenuNewName, setFolderMenuNewName] = useState("");
+  const folderMenuPosRef = useRef<{ top: number; left: number }>({ top: 0, left: 0 });
   const inputRef = useRef<HTMLInputElement>(null);
   const folderMenuOpen = folderMenuFor === session.id;
+
+  // Close the folder dropdown on any outside click / Escape while it is open.
+  const folderMenuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!folderMenuOpen) return;
+    const handlePointerDown = (e: PointerEvent) => {
+      if (folderMenuRef.current && !folderMenuRef.current.contains(e.target as Node)) {
+        onFolderMenuFor?.(null);
+      }
+    };
+    const closeFolderMenuOnKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onFolderMenuFor?.(null);
+    };
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", closeFolderMenuOnKey, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", closeFolderMenuOnKey, true);
+    };
+  }, [folderMenuOpen, onFolderMenuFor]);
 
   // Select the whole name once the rename input is mounted (startRename's
   // immediate setTimeout can fire before the input exists).
@@ -2810,8 +2831,9 @@ function SessionItem({
             </button>
           )}
 
-          {/* Action buttons — shown on hover */}
-          {hovered && !session.transient && !bulkMode && (
+          {/* Action buttons — shown on hover, or while the folder menu is open
+              (the menu lives inside this container). */}
+          {(hovered || folderMenuOpen) && !session.transient && !bulkMode && (
             <div style={{ display: "flex", gap: 4, flexShrink: 0, position: "relative" }}>
               <button
                 onClick={(e) => { e.stopPropagation(); onTogglePinned?.(); }}
@@ -2836,6 +2858,11 @@ function SessionItem({
                   onFolderMenuFor?.(folderMenuOpen ? null : session.id);
                   setFolderMenuCreating(false);
                   setFolderMenuNewName("");
+                  // Capture the button's viewport position while the row (and
+                  // its hover-gated buttons) still exist — the fixed-position
+                  // dropdown survives the row losing :hover.
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  folderMenuPosRef.current = { top: rect.bottom + 4, left: rect.left };
                 }}
                 title={t("sidebar.moveToFolder")}
                 style={{
@@ -2851,16 +2878,19 @@ function SessionItem({
                   <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                 </svg>
               </button>
-              {/* Folder dropdown */}
+              {/* Folder dropdown — fixed at the button's captured viewport
+                  position so neither the row's overflow:hidden nor the list's
+                  scroll container can clip it. */}
               {folderMenuOpen && (
                 <div
+                  ref={folderMenuRef}
                   onClick={(e) => e.stopPropagation()}
                   style={{
-                    position: "absolute",
-                    top: 36,
-                    right: 0,
-                    zIndex: 100,
-                    minWidth: 160,
+                    position: "fixed",
+                    top: Math.min(folderMenuPosRef.current.top, window.innerHeight - 180),
+                    left: Math.max(8, Math.min(folderMenuPosRef.current.left, window.innerWidth - 200)),
+                    zIndex: 1000,
+                    minWidth: 180,
                     background: "var(--bg-panel)",
                     border: "1px solid var(--border)",
                     borderRadius: 8,
