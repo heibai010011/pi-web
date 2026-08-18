@@ -359,7 +359,9 @@ test("keeps live following cancellable when the user scrolls away from the tail"
   assert.match(source, /previousScrollTopRef\.current = scrollTop/);
   assert.match(scrollToBottomSource, /messagesEndRef\.current\?\.scrollIntoView\(\{ behavior \}\);\s*if \(container\) previousScrollTopRef\.current = container\.scrollTop/);
   assert.match(streamUpdateSource, /liveFollowFrameRef\.current === null/);
-  assert.match(streamUpdateSource, /requestAnimationFrame\(\(\) => \{[\s\S]*?liveFollowFrameRef\.current = null;[\s\S]*?if \(isNearBottomRef\.current\) scrollToBottom\("auto"\)/);
+  assert.match(streamUpdateSource, /requestAnimationFrame\(\(\) => \{[\s\S]*?liveFollowFrameRef\.current = null;[\s\S]*?if \(isNearBottomRef\.current && !userScrolledUpRef\.current\) scrollToBottom\("auto"\)/);
+  assert.match(streamUpdateSource, /!pendingScrollToUserRef\.current && isNearBottomRef\.current && !userScrolledUpRef\.current/);
+  assert.match(scrollHandlerSource, /if \(isAgentRunning && scrollTop < previousScrollTopRef\.current && !isAttached\) \{\s*userScrolledUpRef\.current = true;\s*\}/);
   assert.match(scrollHandlerSource, /!wasAttached && isAttached && isAgentRunning[\s\S]*?scrollToBottom\("auto"\)/);
   assert.match(scrollHandlerSource, /cancelAnimationFrame\(liveFollowFrameRef\.current\)/);
   assert.match(source, /previousScrollTopRef\.current = container\.scrollTop;\s*container\.addEventListener\("scroll", handleScrollPositionChange/);
@@ -382,13 +384,14 @@ test("keeps a newly sent user message at the top while its response starts", () 
 
   assert.match(streamUpdateSource, /!pendingScrollToUserRef\.current && isNearBottomRef\.current/);
   assert.match(source, /const \[promptAnchorActive, setPromptAnchorActive\] = useState\(false\)/);
-  assert.match(source, /pendingScrollToUserRef\.current = true;\s*setPromptAnchorActive\(true\)/);
+  assert.match(source, /pendingScrollToUserRef\.current = true;\s*setPromptAnchorActive\(chatAnchorModeRef\.current === "prompt-anchor"\)/);
   assert.match(userScrollSource, /const targetTop = Math\.min\(Math\.max\(0, elAbsTop - 16\), maxScrollTop\)/);
   assert.match(userScrollSource, /cancelAnimationFrame\(liveFollowFrameRef\.current\)/);
   assert.match(userScrollSource, /isNearBottomRef\.current = true/);
+  assert.match(userScrollSource, /userScrolledUpRef\.current = false/);
   assert.match(userScrollSource, /previousScrollTopRef\.current = targetTop/);
   assert.match(userScrollSource, /container\.scrollTo\(\{ top: targetTop, behavior: "auto" \}\)/);
-  assert.match(scrollEffectSource, /pendingScrollToUserRef\.current = false;[\s\S]*?scrollUserMsgToTop\(\)/);
+  assert.match(scrollEffectSource, /pendingScrollToUserRef\.current = false;[\s\S]*?if \(chatAnchorModeRef\.current === "prompt-anchor"\) \{\s*scrollUserMsgToTop\(\);\s*\} else \{/);
   assert.match(chatWindowSource, /const contentEnd = spacer\.getBoundingClientRect\(\)\.top[\s\S]*?getPromptAnchorSpacerHeight\([\s\S]*?targetTop,[\s\S]*?contentEnd,[\s\S]*?container\.clientHeight/);
   assert.match(chatWindowSource, /<div ref=\{promptAnchorSpacerRef\} aria-hidden="true" \/>/);
   assert.match(chatWindowSource, /const promptAnchorAdjustmentDoneRef = useRef\(false\)/);

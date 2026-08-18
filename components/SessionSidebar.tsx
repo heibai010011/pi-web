@@ -7,6 +7,15 @@ import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
+import {
+  createFolderId,
+  EMPTY_SESSION_ORGANIZATION,
+  loadSessionOrganization,
+  persistSessionOrganization,
+  sessionMatchesQuery,
+  type SessionFolder,
+  type SessionOrganization,
+} from "@/lib/session-folders";
 import { useI18n } from "@/hooks/useI18n";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
@@ -436,6 +445,96 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileExplorerRef = useRef<FileExplorerHandle>(null);
 
+  // Session organization: search, pin, folders, bulk selection.
+  const [sessionQuery, setSessionQuery] = useState("");
+  const [sessionOrg, setSessionOrg] = useState<SessionOrganization>(EMPTY_SESSION_ORGANIZATION);
+  const [bulkMode, setBulkMode] = useState(false);
+  const [bulkSelected, setBulkSelected] = useState<Set<string>>(() => new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [folderMenuFor, setFolderMenuFor] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSessionOrg(loadSessionOrganization());
+  }, []);
+
+  const updateSessionOrg = useCallback((mutate: (org: SessionOrganization) => SessionOrganization) => {
+    setSessionOrg((prev) => {
+      const next = mutate(prev);
+      persistSessionOrganization(next);
+      return next;
+    });
+  }, []);
+
+  const togglePinned = useCallback((sessionId: string) => {
+    updateSessionOrg((org) => ({
+      ...org,
+      pinned: org.pinned.includes(sessionId)
+        ? org.pinned.filter((id) => id !== sessionId)
+        : [sessionId, ...org.pinned],
+    }));
+  }, [updateSessionOrg]);
+
+  const createFolder = useCallback((name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const folder: SessionFolder = { id: createFolderId(), name: trimmed };
+    updateSessionOrg((org) => ({ ...org, folders: [...org.folders, folder] }));
+  }, [updateSessionOrg]);
+
+  const renameFolder = useCallback((folderId: string, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    updateSessionOrg((org) => ({
+      ...org,
+      folders: org.folders.map((f) => (f.id === folderId ? { ...f, name: trimmed } : f)),
+    }));
+  }, [updateSessionOrg]);
+
+  const deleteFolder = useCallback((folderId: string) => {
+    // Sessions inside fall back to the ungrouped list; nothing is deleted.
+    updateSessionOrg((org) => ({
+      ...org,
+      folders: org.folders.filter((f) => f.id !== folderId),
+      assignments: Object.fromEntries(
+        Object.entries(org.assignments).filter(([, fid]) => fid !== folderId),
+      ),
+      collapsedFolders: org.collapsedFolders.filter((id) => id !== folderId),
+    }));
+  }, [updateSessionOrg]);
+
+  const moveSessionToFolder = useCallback((sessionId: string, folderId: string | null) => {
+    updateSessionOrg((org) => {
+      const assignments = { ...org.assignments };
+      if (folderId === null) delete assignments[sessionId];
+      else assignments[sessionId] = folderId;
+      return { ...org, assignments };
+    });
+  }, [updateSessionOrg]);
+
+  const toggleFolderCollapsed = useCallback((folderId: string) => {
+    updateSessionOrg((org) => ({
+      ...org,
+      collapsedFolders: org.collapsedFolders.includes(folderId)
+        ? org.collapsedFolders.filter((id) => id !== folderId)
+        : [...org.collapsedFolders, folderId],
+    }));
+  }, [updateSessionOrg]);
+
+  const exitBulkMode = useCallback(() => {
+    setBulkMode(false);
+    setBulkSelected(new Set());
+    setBulkDeleting(false);
+  }, []);
+
+  const toggleBulkSelected = useCallback((sessionId: string) => {
+    setBulkSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      return next;
+    });
+  }, []);
+
   const loadSessions = useCallback(async (showLoading = false, force = false) => {
     try {
       if (showLoading) setLoading(true);
@@ -469,6 +568,28 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       if (showLoading) setLoading(false);
     }
   }, []);
+
+  const bulkDelete = useCallback(async () => {
+    if (bulkDeleting) return;
+    // Running sessions are protected: never delete one mid-run.
+    const targets = [...bulkSelected].filter((id) => !runningSessionIds.has(id));
+    if (targets.length === 0) return;
+    setBulkDeleting(true);
+    try {
+      for (const id of targets) {
+        try {
+          await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+          onSessionDeleted?.(id);
+        } catch {
+          // continue with the rest
+        }
+      }
+      loadSessions();
+    } finally {
+      setBulkDeleting(false);
+      exitBulkMode();
+    }
+  }, [bulkDeleting, bulkSelected, runningSessionIds, onSessionDeleted, loadSessions, exitBulkMode]);
 
   const initialLoadDone = useRef(false);
   useEffect(() => {
@@ -923,6 +1044,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const filteredSessions = selectedProject
     ? sessionsForProject(allSessions, selectedProject.key)
     : allSessions;
+  // Free-text search across name + first message (multi-token AND).
+  const searchedSessions = useMemo(
+    () => filteredSessions.filter((s) => sessionMatchesQuery(s, sessionQuery)),
+    [filteredSessions, sessionQuery],
+  );
+  const hasSearchQuery = sessionQuery.trim().length > 0;
   const showWorktreeSwitcher = Boolean(
     worktreeState?.isGit
     && worktreeState.isTopLevel
@@ -952,8 +1079,75 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         }
       : null);
 
-  // Build parent-child tree within the filtered set
-  const sessionTree = buildSessionTree(filteredSessions);
+  // Build parent-child tree within the filtered set. While searching or in
+  // bulk mode, show a flat list — folders/pins are about organizing the
+  // browsing view, not about constraining search results.
+  const flatList = hasSearchQuery || bulkMode;
+  const sessionTree = flatList
+    ? searchedSessions.map((s) => ({ session: s, children: [] as SessionTreeNode[] }))
+    : buildSessionTree(searchedSessions);
+  // Folder grouping (browsing mode only): pinned first, then folders with
+  // their sessions, then the ungrouped tree.
+  const pinnedIds = useMemo(
+    () => new Set(flatList ? [] : sessionOrg.pinned.filter((id) => searchedSessions.some((s) => s.id === id))),
+    [flatList, sessionOrg.pinned, searchedSessions],
+  );
+  const pinnedSessions = useMemo(
+    () => (flatList ? [] : [...pinnedIds].map((id) => searchedSessions.find((s) => s.id === id)!).filter(Boolean)),
+    [flatList, pinnedIds, searchedSessions],
+  );
+  const folderContents = useMemo(() => {
+    const map = new Map<string, SessionInfo[]>();
+    if (flatList) return map;
+    for (const folder of sessionOrg.folders) map.set(folder.id, []);
+    for (const s of searchedSessions) {
+      if (pinnedIds.has(s.id)) continue;
+      const fid = sessionOrg.assignments[s.id];
+      if (fid && map.has(fid)) {
+        map.get(fid)!.push(s);
+        // Mark as consumed so the ungrouped tree excludes it.
+      }
+    }
+    return map;
+  }, [flatList, sessionOrg.folders, sessionOrg.assignments, searchedSessions, pinnedIds]);
+  const folderAssignedIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const list of folderContents.values()) for (const s of list) ids.add(s.id);
+    return ids;
+  }, [folderContents]);
+  const ungroupedTree = useMemo(
+    () => (flatList ? sessionTree : buildSessionTree(searchedSessions.filter((s) => !pinnedIds.has(s.id) && !folderAssignedIds.has(s.id)))),
+    [flatList, sessionTree, searchedSessions, pinnedIds, folderAssignedIds],
+  );
+
+  // Flat row renderer for pinned/folder groups (no fork nesting inside those).
+  const renderSessionRow = (session: SessionInfo, depth: number) => (
+    <SessionItem
+      key={session.id}
+      session={session}
+      isSelected={session.id === selectedSessionId}
+      isRunning={runningSessionIds.has(session.id)}
+      isUnread={unreadSessionIds.has(session.id)}
+      onClick={() => handleSelectSessionFromList(session)}
+      onRenamed={loadSessions}
+      onDeleted={(id) => {
+        onSessionDeleted?.(id);
+        loadSessions();
+      }}
+      depth={depth}
+      isPinned={pinnedIds.has(session.id)}
+      onTogglePinned={() => togglePinned(session.id)}
+      folders={sessionOrg.folders}
+      currentFolderId={sessionOrg.assignments[session.id] ?? null}
+      onMoveToFolder={(folderId) => moveSessionToFolder(session.id, folderId)}
+      onCreateFolder={(name) => createFolder(name)}
+      bulkMode={bulkMode}
+      bulkChecked={bulkSelected.has(session.id)}
+      onBulkToggle={() => toggleBulkSelected(session.id)}
+      folderMenuFor={folderMenuFor}
+      onFolderMenuFor={setFolderMenuFor}
+    />
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -1618,6 +1812,86 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         )}
       </div>
 
+      {/* Session search + bulk toolbar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 10px 4px", flexShrink: 0 }}>
+        <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}>
+            <circle cx="11" cy="11" r="7" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            value={sessionQuery}
+            onChange={(e) => setSessionQuery(e.target.value)}
+            placeholder={t("sidebar.searchSessions")}
+            aria-label={t("sidebar.searchSessions")}
+            style={{
+              width: "100%",
+              height: 28,
+              padding: "0 8px 0 26px",
+              fontSize: 12,
+              fontFamily: "inherit",
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: 7,
+              outline: "none",
+              color: "var(--text)",
+            }}
+            onFocus={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; }}
+            onBlur={(e) => { e.currentTarget.style.borderColor = "var(--border)"; }}
+          />
+        </div>
+        <ToolbarIconButton
+          onClick={() => (bulkMode ? exitBulkMode() : (setBulkSelected(new Set()), setBulkMode(true)))}
+          title={bulkMode ? t("sidebar.bulkExit") : t("sidebar.bulkSelect")}
+          skipHover={bulkMode}
+          color={bulkMode ? "var(--accent)" : "var(--text-dim)"}
+          ariaPressed={bulkMode}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="9 11 12 14 22 4" />
+            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+          </svg>
+        </ToolbarIconButton>
+      </div>
+
+      {/* Bulk action bar */}
+      {bulkMode && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 10px 6px", flexShrink: 0 }}>
+          <span style={{ fontSize: 11, color: "var(--text-muted)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {t("sidebar.bulkSelectedCount", { count: bulkSelected.size })}
+          </span>
+          <div style={{ display: "flex", gap: 5, marginLeft: "auto", flexShrink: 0 }}>
+            <button
+              onClick={() => {
+                const selectable = searchedSessions.filter((s) => !runningSessionIds.has(s.id)).map((s) => s.id);
+                setBulkSelected((prev) => prev.size === selectable.length ? new Set() : new Set(selectable));
+              }}
+              style={{
+                height: 26, padding: "0 10px", fontSize: 11,
+                background: "var(--bg)", border: "1px solid var(--border)",
+                borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", whiteSpace: "nowrap",
+              }}
+            >
+              {t("sidebar.bulkSelectAll")}
+            </button>
+            <button
+              onClick={() => void bulkDelete()}
+              disabled={bulkSelected.size === 0 || bulkDeleting}
+              style={{
+                height: 26, padding: "0 10px", fontSize: 11, fontWeight: 600,
+                background: bulkSelected.size === 0 ? "var(--bg-hover)" : "#ef4444",
+                border: "none",
+                borderRadius: 6, color: bulkSelected.size === 0 ? "var(--text-dim)" : "#fff",
+                cursor: bulkSelected.size === 0 ? "default" : "pointer",
+                whiteSpace: "nowrap", opacity: bulkDeleting ? 0.6 : 1,
+              }}
+            >
+              {bulkDeleting ? t("sidebar.bulkDeleting") : t("sidebar.bulkDelete", { count: bulkSelected.size })}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Session list */}
       <div style={{ flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>
         {loading && (
@@ -1630,27 +1904,103 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             {error}
           </div>
         )}
-        {!loading && !error && filteredSessions.length === 0 && (
+        {!loading && !error && searchedSessions.length === 0 && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
-            {t("sidebar.noSessions")}
+            {hasSearchQuery ? t("sidebar.noSearchResults") : t("sidebar.noSessions")}
           </div>
         )}
-        {sessionTree.map((node) => (
-          <SessionTreeItem
-            key={node.session.id}
-            node={node}
-            selectedSessionId={selectedSessionId}
-            runningSessionIds={runningSessionIds}
-            unreadSessionIds={unreadSessionIds}
-            onSelectSession={handleSelectSessionFromList}
-            onRenamed={loadSessions}
-            onSessionDeleted={(id) => {
-              onSessionDeleted?.(id);
-              loadSessions();
-            }}
-            depth={0}
-          />
-        ))}
+
+        {/* Pinned group */}
+        {!loading && !error && pinnedSessions.length > 0 && (
+          <>
+            <SidebarGroupLabel label={t("sidebar.pinned")} />
+            {pinnedSessions.map((s) => renderSessionRow(s, 0))}
+          </>
+        )}
+
+        {/* Folder groups */}
+        {!loading && !error && !flatList && sessionOrg.folders.map((folder) => {
+          const items = folderContents.get(folder.id) ?? [];
+          if (items.length === 0 && hasSearchQuery) return null;
+          const collapsed = sessionOrg.collapsedFolders.includes(folder.id);
+          return (
+            <div key={folder.id}>
+              <FolderRow
+                folder={folder}
+                count={items.length}
+                collapsed={collapsed}
+                onToggle={() => toggleFolderCollapsed(folder.id)}
+                onRename={(name) => renameFolder(folder.id, name)}
+                onDelete={() => deleteFolder(folder.id)}
+              />
+              {!collapsed && items.map((s) => renderSessionRow(s, 1))}
+            </div>
+          );
+        })}
+
+        {/* Ungrouped sessions */}
+        {!loading && !error && (ungroupedTree.length > 0 || (flatList && sessionTree.length > 0)) && (
+          sessionOrg.folders.length > 0 && !flatList ? (
+            <>
+              <SidebarGroupLabel label={t("sidebar.ungrouped")} />
+              {ungroupedTree.map((node) => (
+                <SessionTreeItem
+                  key={node.session.id}
+                  node={node}
+                  selectedSessionId={selectedSessionId}
+                  runningSessionIds={runningSessionIds}
+                  unreadSessionIds={unreadSessionIds}
+                  onSelectSession={handleSelectSessionFromList}
+                  onRenamed={loadSessions}
+                  onSessionDeleted={(id) => {
+                    onSessionDeleted?.(id);
+                    loadSessions();
+                  }}
+                  depth={0}
+                  pinnedIds={pinnedIds}
+                  onTogglePinned={togglePinned}
+                  folders={sessionOrg.folders}
+                  assignments={sessionOrg.assignments}
+                  onMoveToFolder={moveSessionToFolder}
+                  onCreateFolder={createFolder}
+                  bulkMode={bulkMode}
+                  bulkSelected={bulkSelected}
+                  onBulkToggle={toggleBulkSelected}
+                  folderMenuFor={folderMenuFor}
+                  onFolderMenuFor={setFolderMenuFor}
+                />
+              ))}
+            </>
+          ) : (
+            sessionTree.map((node) => (
+              <SessionTreeItem
+                key={node.session.id}
+                node={node}
+                selectedSessionId={selectedSessionId}
+                runningSessionIds={runningSessionIds}
+                unreadSessionIds={unreadSessionIds}
+                onSelectSession={handleSelectSessionFromList}
+                onRenamed={loadSessions}
+                onSessionDeleted={(id) => {
+                  onSessionDeleted?.(id);
+                  loadSessions();
+                }}
+                depth={0}
+                pinnedIds={pinnedIds}
+                onTogglePinned={togglePinned}
+                folders={sessionOrg.folders}
+                assignments={sessionOrg.assignments}
+                onMoveToFolder={moveSessionToFolder}
+                onCreateFolder={createFolder}
+                bulkMode={bulkMode}
+                bulkSelected={bulkSelected}
+                onBulkToggle={toggleBulkSelected}
+                folderMenuFor={folderMenuFor}
+                onFolderMenuFor={setFolderMenuFor}
+              />
+            ))
+          )
+        )}
       </div>
 
       {/* File Explorer section */}
@@ -1783,6 +2133,17 @@ function SessionTreeItem({
   onRenamed,
   onSessionDeleted,
   depth,
+  pinnedIds,
+  onTogglePinned,
+  folders,
+  assignments,
+  onMoveToFolder,
+  onCreateFolder,
+  bulkMode,
+  bulkSelected,
+  onBulkToggle,
+  folderMenuFor,
+  onFolderMenuFor,
 }: {
   node: SessionTreeNode;
   selectedSessionId: string | null;
@@ -1792,6 +2153,17 @@ function SessionTreeItem({
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
   depth: number;
+  pinnedIds: Set<string>;
+  onTogglePinned: (id: string) => void;
+  folders: SessionFolder[];
+  assignments: Record<string, string>;
+  onMoveToFolder: (sessionId: string, folderId: string | null) => void;
+  onCreateFolder: (name: string) => void;
+  bulkMode: boolean;
+  bulkSelected: Set<string>;
+  onBulkToggle: (id: string) => void;
+  folderMenuFor: string | null;
+  onFolderMenuFor: (id: string | null) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const hasChildren = node.children.length > 0;
@@ -1822,6 +2194,17 @@ function SessionTreeItem({
           hasChildren={hasChildren}
           collapsed={collapsed}
           onToggleCollapse={() => setCollapsed((v) => !v)}
+          isPinned={pinnedIds.has(node.session.id)}
+          onTogglePinned={() => onTogglePinned(node.session.id)}
+          folders={folders}
+          currentFolderId={assignments[node.session.id] ?? null}
+          onMoveToFolder={(folderId) => onMoveToFolder(node.session.id, folderId)}
+          onCreateFolder={onCreateFolder}
+          bulkMode={bulkMode}
+          bulkChecked={bulkSelected.has(node.session.id)}
+          onBulkToggle={() => onBulkToggle(node.session.id)}
+          folderMenuFor={folderMenuFor}
+          onFolderMenuFor={onFolderMenuFor}
         />
       </div>
       {hasChildren && !collapsed && (
@@ -1837,6 +2220,17 @@ function SessionTreeItem({
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
               depth={depth + 1}
+              pinnedIds={pinnedIds}
+              onTogglePinned={onTogglePinned}
+              folders={folders}
+              assignments={assignments}
+              onMoveToFolder={onMoveToFolder}
+              onCreateFolder={onCreateFolder}
+              bulkMode={bulkMode}
+              bulkSelected={bulkSelected}
+              onBulkToggle={onBulkToggle}
+              folderMenuFor={folderMenuFor}
+              onFolderMenuFor={onFolderMenuFor}
             />
           ))}
         </div>
@@ -1952,6 +2346,139 @@ function showProjectActivity(
   );
 }
 
+function SidebarGroupLabel({ label }: { label: string }) {
+  return (
+    <div style={{
+      padding: "10px 14px 4px",
+      fontSize: 10,
+      fontWeight: 600,
+      letterSpacing: "0.06em",
+      textTransform: "uppercase",
+      color: "var(--text-dim)",
+      userSelect: "none",
+    }}>
+      {label}
+    </div>
+  );
+}
+
+function FolderRow({
+  folder,
+  count,
+  collapsed,
+  onToggle,
+  onRename,
+  onDelete,
+}: {
+  folder: SessionFolder;
+  count: number;
+  collapsed: boolean;
+  onToggle: () => void;
+  onRename: (name: string) => void;
+  onDelete: () => void;
+}) {
+  const { t } = useI18n();
+  const [hovered, setHovered] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState(folder.name);
+
+  if (renaming) {
+    return (
+      <div style={{ padding: "4px 10px" }}>
+        <input
+          autoFocus
+          value={renameValue}
+          onChange={(e) => setRenameValue(e.target.value)}
+          onFocus={(e) => e.currentTarget.select()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && renameValue.trim()) { onRename(renameValue); setRenaming(false); }
+            if (e.key === "Escape") setRenaming(false);
+          }}
+          onBlur={() => { if (renameValue.trim()) onRename(renameValue); setRenaming(false); }}
+          style={{
+            width: "100%", height: 28, padding: "0 8px", fontSize: 12,
+            background: "var(--bg)", border: "1px solid var(--accent)",
+            borderRadius: 6, outline: "none", color: "var(--text)",
+          }}
+        />
+      </div>
+    );
+  }
+
+  if (confirmDelete) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 10px" }}>
+        <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {t("sidebar.deleteFolderConfirm", { name: folder.name.slice(0, 16) })}
+        </span>
+        <button
+          onClick={() => { onDelete(); setConfirmDelete(false); }}
+          style={{ height: 24, padding: "0 9px", fontSize: 11, fontWeight: 600, background: "#ef4444", border: "none", borderRadius: 5, color: "#fff", cursor: "pointer", whiteSpace: "nowrap" }}
+        >
+          {t("sidebar.delete")}
+        </button>
+        <button
+          onClick={() => setConfirmDelete(false)}
+          style={{ height: 24, padding: "0 9px", fontSize: 11, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: "pointer", whiteSpace: "nowrap" }}
+        >
+          {t("sidebar.cancel")}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      onClick={onToggle}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: "flex", alignItems: "center", gap: 6,
+        padding: "6px 12px",
+        marginTop: 6,
+        cursor: "pointer",
+        background: hovered ? "var(--bg-hover)" : "transparent",
+        userSelect: "none",
+      }}
+    >
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}>
+        <polyline points="2 3.5 5 6.5 8 3.5" />
+      </svg>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+      </svg>
+      <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 500, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {folder.name}
+      </span>
+      <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0, fontFamily: "var(--font-mono)" }}>{count}</span>
+      {hovered && (
+        <div style={{ display: "flex", gap: 3, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => { setRenameValue(folder.name); setRenaming(true); }}
+            title={t("sidebar.renameFolder")}
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+            </svg>
+          </button>
+          <button
+            onClick={() => setConfirmDelete(true)}
+            title={t("sidebar.deleteFolder")}
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+            </svg>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SessionItem({
   session,
   isSelected,
@@ -1964,6 +2491,17 @@ function SessionItem({
   hasChildren = false,
   collapsed = false,
   onToggleCollapse,
+  isPinned = false,
+  onTogglePinned,
+  folders = [],
+  currentFolderId = null,
+  onMoveToFolder,
+  onCreateFolder,
+  bulkMode = false,
+  bulkChecked = false,
+  onBulkToggle,
+  folderMenuFor = null,
+  onFolderMenuFor,
 }: {
   session: SessionInfo;
   isSelected: boolean;
@@ -1976,6 +2514,17 @@ function SessionItem({
   hasChildren?: boolean;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  isPinned?: boolean;
+  onTogglePinned?: () => void;
+  folders?: SessionFolder[];
+  currentFolderId?: string | null;
+  onMoveToFolder?: (folderId: string | null) => void;
+  onCreateFolder?: (name: string) => void;
+  bulkMode?: boolean;
+  bulkChecked?: boolean;
+  onBulkToggle?: () => void;
+  folderMenuFor?: string | null;
+  onFolderMenuFor?: (id: string | null) => void;
 }) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
@@ -1983,7 +2532,10 @@ function SessionItem({
   const [renameValue, setRenameValue] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [folderMenuCreating, setFolderMenuCreating] = useState(false);
+  const [folderMenuNewName, setFolderMenuNewName] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const folderMenuOpen = folderMenuFor === session.id;
 
   // Select the whole name once the rename input is mounted (startRename's
   // immediate setTimeout can fire before the input exists).
@@ -2169,8 +2721,24 @@ function SessionItem({
       ) : (
         /* ── Normal view ── */
         <>
+          {/* Bulk-mode checkbox */}
+          {bulkMode && (
+            <label
+              onClick={(e) => e.stopPropagation()}
+              style={{ display: "flex", alignItems: "center", flexShrink: 0, cursor: isRunning ? "not-allowed" : "pointer", opacity: isRunning ? 0.4 : 1 }}
+              title={isRunning ? t("sidebar.bulkRunningProtected") : undefined}
+            >
+              <input
+                type="checkbox"
+                checked={bulkChecked}
+                disabled={Boolean(isRunning)}
+                onChange={() => onBulkToggle?.()}
+                style={{ width: 14, height: 14, accentColor: "var(--accent)", cursor: "pointer" }}
+              />
+            </label>
+          )}
           {/* Fork indicator for child sessions */}
-          {depth > 0 && (
+          {depth > 0 && !bulkMode && (
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
               <line x1="6" y1="3" x2="6" y2="15" />
               <circle cx="18" cy="6" r="3" />
@@ -2243,8 +2811,129 @@ function SessionItem({
           )}
 
           {/* Action buttons — shown on hover */}
-          {hovered && !session.transient && (
-            <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+          {hovered && !session.transient && !bulkMode && (
+            <div style={{ display: "flex", gap: 4, flexShrink: 0, position: "relative" }}>
+              <button
+                onClick={(e) => { e.stopPropagation(); onTogglePinned?.(); }}
+                title={isPinned ? t("sidebar.unpin") : t("sidebar.pin")}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 32, height: 32, padding: 0,
+                  background: "var(--bg-hover)", border: "1px solid var(--border)",
+                  borderRadius: 7, color: isPinned ? "var(--accent)" : "var(--text-muted)",
+                  cursor: "pointer", flexShrink: 0,
+                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill={isPinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="17" x2="12" y2="22" />
+                  <path d="M5 17h14l-1.5-5.5a7 7 0 1 0-11 0L5 17z" />
+                </svg>
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onFolderMenuFor?.(folderMenuOpen ? null : session.id);
+                  setFolderMenuCreating(false);
+                  setFolderMenuNewName("");
+                }}
+                title={t("sidebar.moveToFolder")}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 32, height: 32, padding: 0,
+                  background: "var(--bg-hover)", border: "1px solid var(--border)",
+                  borderRadius: 7, color: currentFolderId ? "var(--accent)" : "var(--text-muted)",
+                  cursor: "pointer", flexShrink: 0,
+                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                </svg>
+              </button>
+              {/* Folder dropdown */}
+              {folderMenuOpen && (
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    position: "absolute",
+                    top: 36,
+                    right: 0,
+                    zIndex: 100,
+                    minWidth: 160,
+                    background: "var(--bg-panel)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+                    padding: 4,
+                  }}
+                >
+                  {folders.map((f) => (
+                    <button
+                      key={f.id}
+                      onClick={() => {
+                        onMoveToFolder?.(currentFolderId === f.id ? null : f.id);
+                        onFolderMenuFor?.(null);
+                      }}
+                      style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                        width: "100%", padding: "6px 8px",
+                        background: currentFolderId === f.id ? "var(--bg-selected)" : "none",
+                        border: "none", borderRadius: 5,
+                        color: currentFolderId === f.id ? "var(--accent)" : "var(--text)",
+                        fontSize: 12, cursor: "pointer", textAlign: "left",
+                      }}
+                    >
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
+                      {currentFolderId === f.id && (
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginLeft: 4 }}>
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      )}
+                    </button>
+                  ))}
+                  {folders.length > 0 && <div style={{ height: 1, background: "var(--border)", margin: "4px 6px" }} />}
+                  {folderMenuCreating ? (
+                    <div style={{ display: "flex", gap: 4, padding: "2px 4px" }}>
+                      <input
+                        autoFocus
+                        value={folderMenuNewName}
+                        onChange={(e) => setFolderMenuNewName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && folderMenuNewName.trim()) {
+                            onCreateFolder?.(folderMenuNewName);
+                            setFolderMenuNewName("");
+                            onFolderMenuFor?.(null);
+                          }
+                          if (e.key === "Escape") { setFolderMenuCreating(false); setFolderMenuNewName(""); }
+                        }}
+                        placeholder={t("sidebar.folderName")}
+                        style={{
+                          flex: 1, minWidth: 0, height: 26, padding: "0 6px", fontSize: 11,
+                          background: "var(--bg)", border: "1px solid var(--accent)",
+                          borderRadius: 5, outline: "none", color: "var(--text)",
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setFolderMenuCreating(true)}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 5,
+                        width: "100%", padding: "6px 8px",
+                        background: "none", border: "none", borderRadius: 5,
+                        color: "var(--text-muted)", fontSize: 12, cursor: "pointer", textAlign: "left",
+                      }}
+                    >
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                        <line x1="12" y1="5" x2="12" y2="19" />
+                        <line x1="5" y1="12" x2="19" y2="12" />
+                      </svg>
+                      {t("sidebar.newFolder")}
+                    </button>
+                  )}
+                </div>
+              )}
               <button
                 onClick={startRename}
                 title={t("sidebar.rename")}
