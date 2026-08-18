@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import type { SessionInfo } from "@/lib/types";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
@@ -2889,17 +2890,18 @@ function SessionItem({
                   <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                 </svg>
               </button>
-              {/* Folder dropdown — fixed at the button's captured viewport
-                  position so neither the row's overflow:hidden nor the list's
-                  scroll container can clip it. Flips above the row when the
-                  space below is insufficient. */}
+              {/* Folder dropdown — portaled to document.body so no ancestor
+                  (the row's overflow:hidden, list scroll, or any transformed
+                  wrapper that would create a containing block for fixed
+                  positioning) can clip it. Fixed at the button's captured
+                  viewport position; flips above when space below is short. */}
               {folderMenuOpen && (() => {
                 const estHeight = 46 + folders.length * 30 + (folders.length > 0 ? 9 : 0);
                 const flipUp = folderMenuPosRef.current.top + estHeight > window.innerHeight - 12;
                 const pos = flipUp
                   ? { bottom: folderMenuPosRef.current.bottom, transformOrigin: "bottom right" }
                   : { top: folderMenuPosRef.current.top, transformOrigin: "top right" };
-                return (
+                return createPortal(
                 <div
                   ref={folderMenuRef}
                   className="folder-menu-pop"
@@ -2996,7 +2998,8 @@ function SessionItem({
                       {t("sidebar.newFolder")}
                     </button>
                   )}
-                </div>
+                </div>,
+                document.body
                 );
               })()}
               <button
