@@ -2676,7 +2676,9 @@ function SessionItem({
           : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
         borderLeft: confirmDelete
           ? "2px solid #ef4444"
-          : isSelected ? "2px solid var(--accent)" : "2px solid transparent",
+          : isSelected ? "2px solid var(--accent)"
+          : isPinned ? "2px solid color-mix(in srgb, var(--accent) 45%, transparent)"
+          : "2px solid transparent",
         transition: "background 0.1s",
         opacity: deleting ? 0.5 : 1,
         gap: 6,
@@ -2766,6 +2768,13 @@ function SessionItem({
                 style={{ width: 14, height: 14, accentColor: "var(--accent)", cursor: "pointer" }}
               />
             </label>
+          )}
+          {/* Pinned marker — always visible, not just on hover */}
+          {isPinned && !bulkMode && (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--accent)" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-label={t("sidebar.pinned")}>
+              <line x1="12" y1="17" x2="12" y2="22" />
+              <path d="M5 17h14l-1.5-5.5a7 7 0 1 0-11 0L5 17z" />
+            </svg>
           )}
           {/* Fork indicator for child sessions */}
           {depth > 0 && !bulkMode && (
