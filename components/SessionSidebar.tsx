@@ -2534,7 +2534,7 @@ function SessionItem({
   const [deleting, setDeleting] = useState(false);
   const [folderMenuCreating, setFolderMenuCreating] = useState(false);
   const [folderMenuNewName, setFolderMenuNewName] = useState("");
-  const folderMenuPosRef = useRef<{ top: number; left: number }>({ top: 0, left: 0 });
+  const folderMenuPosRef = useRef<{ top: number; bottom: number; left: number }>({ top: 0, bottom: 0, left: 0 });
   const inputRef = useRef<HTMLInputElement>(null);
   const folderMenuOpen = folderMenuFor === session.id;
 
@@ -2550,11 +2550,16 @@ function SessionItem({
     const closeFolderMenuOnKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onFolderMenuFor?.(null);
     };
+    // The dropdown is fixed at coordinates captured when it opened; any scroll
+    // of the list would detach it from its anchor, so close instead.
+    const closeFolderMenuOnScroll = () => onFolderMenuFor?.(null);
     document.addEventListener("pointerdown", handlePointerDown, true);
     document.addEventListener("keydown", closeFolderMenuOnKey, true);
+    window.addEventListener("scroll", closeFolderMenuOnScroll, true);
     return () => {
       document.removeEventListener("pointerdown", handlePointerDown, true);
       document.removeEventListener("keydown", closeFolderMenuOnKey, true);
+      window.removeEventListener("scroll", closeFolderMenuOnScroll, true);
     };
   }, [folderMenuOpen, onFolderMenuFor]);
 
@@ -2862,7 +2867,13 @@ function SessionItem({
                   // its hover-gated buttons) still exist — the fixed-position
                   // dropdown survives the row losing :hover.
                   const rect = e.currentTarget.getBoundingClientRect();
-                  folderMenuPosRef.current = { top: rect.bottom + 4, left: rect.left };
+                  // Dropdown anchors to the button's bottom-right; flips above
+                  // the row when there is not enough space below.
+                  folderMenuPosRef.current = {
+                    top: rect.bottom + 6,
+                    bottom: window.innerHeight - rect.top + 6,
+                    left: rect.right,
+                  };
                 }}
                 title={t("sidebar.moveToFolder")}
                 style={{
@@ -2880,24 +2891,37 @@ function SessionItem({
               </button>
               {/* Folder dropdown — fixed at the button's captured viewport
                   position so neither the row's overflow:hidden nor the list's
-                  scroll container can clip it. */}
-              {folderMenuOpen && (
+                  scroll container can clip it. Flips above the row when the
+                  space below is insufficient. */}
+              {folderMenuOpen && (() => {
+                const estHeight = 46 + folders.length * 30 + (folders.length > 0 ? 9 : 0);
+                const flipUp = folderMenuPosRef.current.top + estHeight > window.innerHeight - 12;
+                const pos = flipUp
+                  ? { bottom: folderMenuPosRef.current.bottom, transformOrigin: "bottom right" }
+                  : { top: folderMenuPosRef.current.top, transformOrigin: "top right" };
+                return (
                 <div
                   ref={folderMenuRef}
+                  className="folder-menu-pop"
                   onClick={(e) => e.stopPropagation()}
                   style={{
                     position: "fixed",
-                    top: Math.min(folderMenuPosRef.current.top, window.innerHeight - 180),
-                    left: Math.max(8, Math.min(folderMenuPosRef.current.left, window.innerWidth - 200)),
+                    ...pos,
+                    right: Math.max(8, window.innerWidth - folderMenuPosRef.current.left),
                     zIndex: 1000,
-                    minWidth: 180,
+                    minWidth: 190,
                     background: "var(--bg-panel)",
                     border: "1px solid var(--border)",
                     borderRadius: 8,
-                    boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
-                    padding: 4,
+                    boxShadow: "0 6px 20px rgba(0,0,0,0.14)",
+                    padding: 5,
                   }}
                 >
+                  {folders.length === 0 && !folderMenuCreating && (
+                    <div style={{ padding: "6px 9px", color: "var(--text-dim)", fontSize: 11 }}>
+                      {t("sidebar.noFoldersYet")}
+                    </div>
+                  )}
                   {folders.map((f) => (
                     <button
                       key={f.id}
@@ -2906,25 +2930,32 @@ function SessionItem({
                         onFolderMenuFor?.(null);
                       }}
                       style={{
-                        display: "flex", alignItems: "center", justifyContent: "space-between",
-                        width: "100%", padding: "6px 8px",
+                        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+                        width: "100%", padding: "6px 9px",
                         background: currentFolderId === f.id ? "var(--bg-selected)" : "none",
                         border: "none", borderRadius: 5,
                         color: currentFolderId === f.id ? "var(--accent)" : "var(--text)",
                         fontSize: 12, cursor: "pointer", textAlign: "left",
+                        transition: "background 0.1s",
                       }}
+                      onMouseEnter={(e) => { if (currentFolderId !== f.id) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                      onMouseLeave={(e) => { if (currentFolderId !== f.id) e.currentTarget.style.background = "none"; }}
                     >
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
-                      {currentFolderId === f.id && (
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginLeft: 4 }}>
+                      {currentFolderId === f.id ? (
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                           <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      ) : (
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: "var(--text-dim)" }}>
+                          <polyline points="9 18 15 12 9 6" />
                         </svg>
                       )}
                     </button>
                   ))}
-                  {folders.length > 0 && <div style={{ height: 1, background: "var(--border)", margin: "4px 6px" }} />}
+                  {folders.length > 0 && <div style={{ height: 1, background: "var(--border)", margin: "5px 7px" }} />}
                   {folderMenuCreating ? (
-                    <div style={{ display: "flex", gap: 4, padding: "2px 4px" }}>
+                    <div style={{ display: "flex", gap: 4, padding: "3px 4px 1px" }}>
                       <input
                         autoFocus
                         value={folderMenuNewName}
@@ -2939,7 +2970,7 @@ function SessionItem({
                         }}
                         placeholder={t("sidebar.folderName")}
                         style={{
-                          flex: 1, minWidth: 0, height: 26, padding: "0 6px", fontSize: 11,
+                          flex: 1, minWidth: 0, height: 26, padding: "0 7px", fontSize: 11,
                           background: "var(--bg)", border: "1px solid var(--accent)",
                           borderRadius: 5, outline: "none", color: "var(--text)",
                         }}
@@ -2949,11 +2980,14 @@ function SessionItem({
                     <button
                       onClick={() => setFolderMenuCreating(true)}
                       style={{
-                        display: "flex", alignItems: "center", gap: 5,
-                        width: "100%", padding: "6px 8px",
+                        display: "flex", alignItems: "center", gap: 6,
+                        width: "100%", padding: "6px 9px",
                         background: "none", border: "none", borderRadius: 5,
                         color: "var(--text-muted)", fontSize: 12, cursor: "pointer", textAlign: "left",
+                        transition: "background 0.1s",
                       }}
+                      onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
                     >
                       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                         <line x1="12" y1="5" x2="12" y2="19" />
@@ -2963,7 +2997,8 @@ function SessionItem({
                     </button>
                   )}
                 </div>
-              )}
+                );
+              })()}
               <button
                 onClick={startRename}
                 title={t("sidebar.rename")}

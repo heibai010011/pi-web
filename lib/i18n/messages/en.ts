@@ -136,6 +136,7 @@ export const enLocale: LocalePlugin = {
     "sidebar.unpin": "Unpin",
     "sidebar.pinned": "Pinned",
     "sidebar.moveToFolder": "Move to folder",
+    "sidebar.noFoldersYet": "No folders yet — create one below",
     "sidebar.newFolder": "New folder",
     "sidebar.folderName": "Folder name",
     "sidebar.renameFolder": "Rename folder",

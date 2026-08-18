@@ -136,6 +136,7 @@ export const zhCNLocale: LocalePlugin = {
     "sidebar.unpin": "取消置顶",
     "sidebar.pinned": "已置顶",
     "sidebar.moveToFolder": "移入文件夹",
+    "sidebar.noFoldersYet": "还没有文件夹，先创建一个",
     "sidebar.newFolder": "新建文件夹",
     "sidebar.folderName": "文件夹名称",
     "sidebar.renameFolder": "重命名文件夹",
