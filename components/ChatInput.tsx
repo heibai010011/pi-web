@@ -26,6 +26,7 @@ import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 import type { ToolPreset } from "@/lib/tool-presets";
+import type { ChatStreamAnchorMode } from "@/lib/chat-lazy-load";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -77,6 +78,9 @@ interface Props {
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
   onAudioUnlock?: () => void;
+  /** Streaming viewport anchor mode: "tail" (follow bottom) or "prompt-anchor" (pin prompt to top) */
+  anchorMode?: ChatStreamAnchorMode;
+  onAnchorModeChange?: (mode: ChatStreamAnchorMode) => void;
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
@@ -389,6 +393,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
   soundEnabled, onSoundToggle, onAudioUnlock,
+  anchorMode, onAnchorModeChange,
   onPromptWithStreamingBehavior,
   draftKey,
   cwd,
@@ -2544,6 +2549,52 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               </button>
             )}
 
+            {onAnchorModeChange !== undefined && anchorMode !== undefined && (
+              <button
+                onClick={() => onAnchorModeChange(anchorMode === "tail" ? "prompt-anchor" : "tail")}
+                title={anchorMode === "tail" ? t("chat.anchorModeTail") : t("chat.anchorModePrompt")}
+                aria-label={anchorMode === "tail" ? t("chat.anchorModeTail") : t("chat.anchorModePrompt")}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                  width: 32,
+                  height: 32,
+                  padding: 0,
+                  background: "none",
+                  border: "none",
+                  borderRadius: 9,
+                  color: anchorMode === "tail" ? "var(--text-muted)" : "var(--text-dim)",
+                  cursor: "pointer",
+                  opacity: anchorMode === "tail" ? 1 : 0.85,
+                  transition: "background 0.12s, color 0.12s, opacity 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--bg-hover)";
+                  e.currentTarget.style.color = "var(--text)";
+                  e.currentTarget.style.opacity = "1";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "none";
+                  e.currentTarget.style.color = anchorMode === "tail" ? "var(--text-muted)" : "var(--text-dim)";
+                  e.currentTarget.style.opacity = anchorMode === "tail" ? "1" : "0.85";
+                }}
+              >
+                {anchorMode === "tail" ? (
+                  // Pin-to-bottom: filled arrow docked to the bottom edge
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="12" y1="4" x2="12" y2="15" />
+                    <polyline points="5 12 12 19 19 12" />
+                    <line x1="4" y1="22" x2="20" y2="22" />
+                  </svg>
+                ) : (
+                  // Pin-to-top: outline arrow docked to the top edge
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="12" y1="20" x2="12" y2="9" />
+                    <polyline points="5 12 12 5 19 12" />
+                    <line x1="4" y1="2" x2="20" y2="2" />
+                  </svg>
+                )}
+              </button>
+            )}
             {onSoundToggle !== undefined && (
               <button
                 onClick={onSoundToggle}

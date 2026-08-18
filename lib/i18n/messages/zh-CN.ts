@@ -236,6 +236,8 @@ export const zhCNLocale: LocalePlugin = {
     "chat.stop": "停止",
     "chat.disableSound": "关闭完成提示音",
     "chat.enableSound": "开启完成提示音",
+    "chat.anchorModeTail": "回复时贴底跟随（点击切换为钉住提问）",
+    "chat.anchorModePrompt": "回复时钉住提问（点击切换为贴底跟随）",
     "chat.thinkingUseDefault": "使用 pi 默认设置",
     "chat.thinkingOff": "关闭推理",
     "chat.thinkingMinimal": "最低限度推理",

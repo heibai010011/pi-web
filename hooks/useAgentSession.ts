@@ -25,6 +25,9 @@ import {
   CHAT_SCROLL_REATTACH_TOLERANCE,
   CHAT_SCROLL_TAIL_TOLERANCE,
   getLiveFollowAttached,
+  loadChatAnchorMode,
+  persistChatAnchorMode,
+  type ChatStreamAnchorMode,
 } from "@/lib/chat-lazy-load";
 import {
   INITIAL_STREAMING_STATE,
@@ -301,6 +304,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
   const [promptAnchorActive, setPromptAnchorActive] = useState(false);
+  const [chatAnchorMode, setChatAnchorModeState] = useState<ChatStreamAnchorMode>("tail");
+  const chatAnchorModeRef = useRef<ChatStreamAnchorMode>("tail");
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
@@ -331,6 +336,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const isNearBottomRef = useRef(true);
   const previousScrollTopRef = useRef(0);
   const liveFollowFrameRef = useRef<number | null>(null);
+  // Set when the user has scrolled up during a live-follow stream; any pending
+  // auto-scroll frame must respect this instead of reading the stale
+  // isNearBottomRef snapshot taken when the frame was scheduled.
+  const userScrolledUpRef = useRef(false);
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -379,6 +388,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const container = scrollContainerRef.current;
     messagesEndRef.current?.scrollIntoView({ behavior });
     if (container) previousScrollTopRef.current = container.scrollTop;
+  }, []);
+
+  // Load the persisted anchor mode once on the client (localStorage is not
+  // available during SSR; the default "tail" renders identically).
+  useEffect(() => {
+    const mode = loadChatAnchorMode();
+    chatAnchorModeRef.current = mode;
+    setChatAnchorModeState(mode);
+  }, []);
+
+  const setChatAnchorMode = useCallback((mode: ChatStreamAnchorMode) => {
+    chatAnchorModeRef.current = mode;
+    setChatAnchorModeState(mode);
+    persistChatAnchorMode(mode);
   }, []);
 
   const currentModel = currentModelOverride ?? data?.context.model ?? pendingModel ?? null;
@@ -1134,12 +1157,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         // Live-follow the streaming output only when the user is already near
         // the bottom of the message list. If they scrolled up, leave them there.
-        if (!pendingScrollToUserRef.current && isNearBottomRef.current && liveFollowFrameRef.current === null) {
+        if (!pendingScrollToUserRef.current && isNearBottomRef.current && !userScrolledUpRef.current && liveFollowFrameRef.current === null) {
           // Defer the scroll so React has time to update the DOM with the new
           // streaming content; otherwise scrollIntoView may target stale layout.
           liveFollowFrameRef.current = requestAnimationFrame(() => {
             liveFollowFrameRef.current = null;
-            if (isNearBottomRef.current) scrollToBottom("auto");
+            // Re-check at frame time: the user may have scrolled up between
+            // scheduling this frame and now — never yank them back down.
+            if (isNearBottomRef.current && !userScrolledUpRef.current) scrollToBottom("auto");
           });
         }
         break;
@@ -1291,7 +1316,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
     dispatch({ type: "start" });
     pendingScrollToUserRef.current = true;
-    setPromptAnchorActive(true);
+    setPromptAnchorActive(chatAnchorModeRef.current === "prompt-anchor");
+    userScrolledUpRef.current = false;
 
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     let sentSessionId: string | null = null;
@@ -1751,6 +1777,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       liveFollowFrameRef.current = null;
     }
     isNearBottomRef.current = true;
+    userScrolledUpRef.current = false;
     previousScrollTopRef.current = targetTop;
     container.scrollTo({ top: targetTop, behavior: "auto" });
   }, []);
@@ -1771,9 +1798,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ? CHAT_SCROLL_REATTACH_TOLERANCE
           : CHAT_SCROLL_TAIL_TOLERANCE,
       );
+      // Track explicit upward user movement while the agent runs: a pending
+      // live-follow frame scheduled before this scroll must not yank the
+      // viewport back down after the user has deliberately scrolled up.
+      if (isAgentRunning && scrollTop < previousScrollTopRef.current && !isAttached) {
+        userScrolledUpRef.current = true;
+      }
       isNearBottomRef.current = isAttached;
       previousScrollTopRef.current = scrollTop;
       if (!wasAttached && isAttached && isAgentRunning) {
+        userScrolledUpRef.current = false;
         scrollToBottom("auto");
       } else if (!isAttached && liveFollowFrameRef.current !== null) {
         cancelAnimationFrame(liveFollowFrameRef.current);
@@ -1873,7 +1907,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (pendingScrollToUserRef.current) {
         pendingScrollToUserRef.current = false;
         initialScrollDoneRef.current = true;
-        scrollUserMsgToTop();
+        if (chatAnchorModeRef.current === "prompt-anchor") {
+          scrollUserMsgToTop();
+        } else {
+          // Tail mode: a new prompt keeps the viewport glued to the bottom,
+          // where the reply will stream in.
+          isNearBottomRef.current = true;
+          userScrolledUpRef.current = false;
+          scrollToBottom("auto");
+        }
       } else if (!initialScrollDoneRef.current) {
         initialScrollDoneRef.current = true;
         scrollToBottom("instant");
@@ -1931,6 +1973,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentPhase,
     isNew,
     promptAnchorActive,
+    chatAnchorMode,
+    setChatAnchorMode,
     // Refs
     sessionIdRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,

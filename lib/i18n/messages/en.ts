@@ -236,6 +236,8 @@ export const enLocale: LocalePlugin = {
     "chat.stop": "Stop",
     "chat.disableSound": "Disable completion sound",
     "chat.enableSound": "Enable completion sound",
+    "chat.anchorModeTail": "Follow the bottom while replying (click to pin the prompt instead)",
+    "chat.anchorModePrompt": "Pin the prompt while replying (click to follow the bottom instead)",
     "chat.thinkingUseDefault": "Use pi default",
     "chat.thinkingOff": "Reasoning off",
     "chat.thinkingMinimal": "Minimal reasoning",

@@ -287,6 +287,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef, promptAnchorActive,
+    chatAnchorMode, setChatAnchorMode,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
@@ -569,6 +570,8 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
       onBuiltinCommand={handleBuiltinSlashCommand}
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
+      anchorMode={chatAnchorMode}
+      onAnchorModeChange={setChatAnchorMode}
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? newSessionDraftKey ?? undefined}
       cwd={session?.cwd ?? newSessionCwd}
