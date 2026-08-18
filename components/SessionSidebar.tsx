@@ -1973,7 +1973,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               ))}
             </>
           ) : (
-            sessionTree.map((node) => (
+            // No folders exist: render the ungrouped tree, which already
+            // excludes pinned sessions (rendered in the pinned group above)
+            // and folder-assigned sessions.
+            ungroupedTree.map((node) => (
               <SessionTreeItem
                 key={node.session.id}
                 node={node}
