@@ -1,8 +1,16 @@
 import type { CSSProperties } from "react";
 
-const ANSI_ESCAPE_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
-const ANSI_ESCAPE_AT_START_RE = /^\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/;
+// OSC body stops at ESC or BEL so a greedy `[^\x07]*` cannot swallow the
+// visible text between two hyperlink sequences (open + close).
+// The OSC branch must come first: the single-char class `[@-Z\\-_]` contains
+// `]` via its `-` .. `_` range, so `\x1B]` would otherwise always match as a
+// 2-char escape and leak the OSC body (`8;;file:///...`) into visible text.
+const ANSI_ESCAPE_RE = /\x1B(?:\][^\x07\x1B]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
+const ANSI_ESCAPE_AT_START_RE = /^\x1B(?:\][^\x07\x1B]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/;
 const ANSI_SGR_RE = /\x1B\[([0-9;]*)m/g;
+// OSC 8 hyperlinks: `ESC ] 8 ; params ; URI ST` ... `ESC ] 8 ; ; ST`.
+// ST is either `ESC \` or BEL. The URI may be empty when closing a link.
+const OSC_8_SEQ_RE = /\x1B\]8;([^\x07\x1B]*);([^\x07\x1B]*)(?:\x07|\x1B\\)/;
 const TUI_CURSOR_MARKER_RE = /\x1B_pi:c\x07/g;
 
 const ANSI_8_COLORS = [
@@ -30,6 +38,8 @@ const ANSI_BRIGHT_COLORS = [
 export interface AnsiSegment {
   text: string;
   style: CSSProperties;
+  /** OSC 8 hyperlink URL for this segment, when present. */
+  link?: string;
 }
 
 export function stripAnsi(text: string): string {
@@ -188,23 +198,39 @@ function applyAnsiCodes(style: CSSProperties, codes: number[]): CSSProperties {
 export function parseAnsiLine(line: string): AnsiSegment[] {
   const segments: AnsiSegment[] = [];
   let style: CSSProperties = {};
+  let link: string | undefined;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
-  ANSI_SGR_RE.lastIndex = 0;
 
-  while ((match = ANSI_SGR_RE.exec(line)) !== null) {
-    if (match.index > lastIndex) {
-      segments.push({ text: line.slice(lastIndex, match.index), style });
+  // Single pass over both SGR sequences and OSC 8 hyperlinks, in order.
+  // Each regex is stateful when used with exec(), so build fresh instances.
+  // Alternation group indexes: [1] SGR params, [2] OSC 8 params, [3] OSC 8 URI.
+  const sequenceRe = new RegExp(`(?:${ANSI_SGR_RE.source})|(?:${OSC_8_SEQ_RE.source})`, "g");
+
+  const pushText = (endExclusive: number) => {
+    if (endExclusive > lastIndex) {
+      segments.push({ text: line.slice(lastIndex, endExclusive), style, ...(link ? { link } : {}) });
     }
-    const codes = match[1]
-      ? match[1].split(";").map((part) => Number(part || "0"))
-      : [0];
-    style = applyAnsiCodes(style, codes);
+  };
+
+  while ((match = sequenceRe.exec(line)) !== null) {
+    if (match.index > lastIndex) {
+      pushText(match.index);
+    }
+    if (match[3] !== undefined) {
+      // OSC 8: non-empty URI opens a link; the empty-URI form closes it.
+      link = match[3] ? match[3] : undefined;
+    } else {
+      const codes = match[1]
+        ? match[1].split(";").map((part) => Number(part || "0"))
+        : [0];
+      style = applyAnsiCodes(style, codes);
+    }
     lastIndex = match.index + match[0].length;
   }
 
   if (lastIndex < line.length) {
-    segments.push({ text: line.slice(lastIndex), style });
+    pushText(line.length);
   }
 
   return segments;

@@ -1,6 +1,8 @@
 "use client";
 
+import { type MouseEvent } from "react";
 import { parseAnsiLine, stripAnsi } from "@/lib/ansi";
+import { resolveLocalFileHref } from "@/lib/file-links";
 import type { ExtensionStatusItem, ExtensionWidgetItem } from "@/lib/types";
 import { ExtensionWidgets } from "./ExtensionWidgets";
 
@@ -21,14 +23,47 @@ export function formatExtensionStatusLine(statuses: ExtensionStatusItem[]): stri
 export function ExtensionStatusBar({
   statuses,
   widgets = [],
+  onOpenFile,
 }: {
   statuses: ExtensionStatusItem[];
   widgets?: ExtensionWidgetItem[];
+  onOpenFile?: (filePath: string) => void;
 }) {
   if (statuses.length === 0 && widgets.length === 0) return null;
 
   const statusLine = formatExtensionStatusLine(statuses);
   const plainStatusLine = stripAnsi(statusLine);
+
+  const renderSegmentLink = (
+    segment: ReturnType<typeof parseAnsiLine>[number],
+    index: number,
+  ) => {
+    if (!segment.link) {
+      return <span key={index} style={segment.style}>{segment.text}</span>;
+    }
+
+    const filePath = resolveLocalFileHref(segment.link);
+    const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+      if (!filePath || !onOpenFile) return;
+      if (event.defaultPrevented || event.button !== 0) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      onOpenFile(filePath);
+    };
+
+    return (
+      <a
+        key={index}
+        href={segment.link}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={handleClick}
+        style={{ ...segment.style, textDecoration: "underline" }}
+      >
+        {segment.text}
+      </a>
+    );
+  };
 
   return (
     <div
@@ -43,9 +78,7 @@ export function ExtensionStatusBar({
           title={plainStatusLine}
         >
           <span className="extension-status-text">
-            {parseAnsiLine(statusLine).map((segment, index) => (
-              <span key={index} style={segment.style}>{segment.text}</span>
-            ))}
+            {parseAnsiLine(statusLine).map(renderSegmentLink)}
           </span>
         </div>
       )}

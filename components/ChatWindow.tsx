@@ -692,7 +692,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
               </div>
             </div>
             {chatInputElement}
-            <ExtensionStatusBar statuses={extensionStatuses} widgets={extensionWidgets} />
+            <ExtensionStatusBar statuses={extensionStatuses} widgets={extensionWidgets} onOpenFile={onOpenFile} />
           </div>
         </div>
       ) : (
@@ -934,7 +934,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
 
       <div className="relative">
         {chatInputElement}
-        <ExtensionStatusBar statuses={extensionStatuses} widgets={extensionWidgets} />
+        <ExtensionStatusBar statuses={extensionStatuses} widgets={extensionWidgets} onOpenFile={onOpenFile} />
       </div>
       </>
       )}
