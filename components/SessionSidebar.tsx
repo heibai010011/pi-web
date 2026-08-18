@@ -2868,12 +2868,13 @@ function SessionItem({
                   // its hover-gated buttons) still exist — the fixed-position
                   // dropdown survives the row losing :hover.
                   const rect = e.currentTarget.getBoundingClientRect();
-                  // Dropdown anchors to the button's bottom-right; flips above
-                  // the row when there is not enough space below.
+                  // Dropdown anchors below the button's left edge; the render
+                  // clamps it fully inside the viewport. Flips above the row
+                  // when there is not enough space below.
                   folderMenuPosRef.current = {
                     top: rect.bottom + 6,
                     bottom: window.innerHeight - rect.top + 6,
-                    left: rect.right,
+                    left: rect.left,
                   };
                 }}
                 title={t("sidebar.moveToFolder")}
@@ -2898,9 +2899,13 @@ function SessionItem({
               {folderMenuOpen && (() => {
                 const estHeight = 46 + folders.length * 30 + (folders.length > 0 ? 9 : 0);
                 const flipUp = folderMenuPosRef.current.top + estHeight > window.innerHeight - 12;
+                // Clamp fully inside the viewport: the sidebar sits at the
+                // window's left edge, so a right-anchored 190px menu would
+                // render off-screen to the left.
+                const left = Math.max(8, Math.min(folderMenuPosRef.current.left, window.innerWidth - 198));
                 const pos = flipUp
-                  ? { bottom: folderMenuPosRef.current.bottom, transformOrigin: "bottom right" }
-                  : { top: folderMenuPosRef.current.top, transformOrigin: "top right" };
+                  ? { bottom: folderMenuPosRef.current.bottom, transformOrigin: "bottom left" }
+                  : { top: folderMenuPosRef.current.top, transformOrigin: "top left" };
                 return createPortal(
                 <div
                   ref={folderMenuRef}
@@ -2909,7 +2914,7 @@ function SessionItem({
                   style={{
                     position: "fixed",
                     ...pos,
-                    right: Math.max(8, window.innerWidth - folderMenuPosRef.current.left),
+                    left,
                     zIndex: 1000,
                     minWidth: 190,
                     background: "var(--bg-panel)",
