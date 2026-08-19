@@ -97,6 +97,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       >
         {normalizedMarkdown}
       </ReactMarkdown>
+      {isStreaming && <span className="streaming-cursor" aria-hidden="true" />}
     </div>
   );
 }

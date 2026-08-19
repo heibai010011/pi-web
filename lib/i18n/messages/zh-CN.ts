@@ -185,7 +185,6 @@ export const zhCNLocale: LocalePlugin = {
     "chat.runningToolsMore": "正在运行 {names}（另有 {count} 个）...",
     "chat.waitingModel": "正在等待模型...",
     "chat.runningCommand": "正在运行命令...",
-    "chat.agentWorking": "正在处理…",
     "chat.thinking": "正在思考...",
     "chat.processDetails": "处理详情",
     "chat.message": "条消息",

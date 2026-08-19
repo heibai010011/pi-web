@@ -1143,6 +1143,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (msg?.role === "assistant") {
             dispatch({ type: "snapshot", message: msg });
             if (msg.content.length > 0) setAgentPhase(null);
+            // A new assistant message means a retry attempt is actively
+            // streaming its answer — pi only emits auto_retry_end(success)
+            // when that answer completes, so clear the banner now instead of
+            // showing "retrying" over the entire retried response.
+            setRetryInfo(null);
           } else if (msg) {
             setAgentPhase(null);
           }

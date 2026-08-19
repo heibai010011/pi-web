@@ -572,13 +572,6 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
       onSoundToggle={onSoundToggle}
       anchorMode={chatAnchorMode}
       onAnchorModeChange={setChatAnchorMode}
-      streamStatus={
-        (agentRunning || bashRunning)
-          ? (agentRunning
-              ? (phaseLabel(agentPhase, t) ?? t("chat.agentWorking"))
-              : t("chat.runningCommand"))
-          : null
-      }
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? newSessionDraftKey ?? undefined}
       cwd={session?.cwd ?? newSessionCwd}

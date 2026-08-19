@@ -8,25 +8,33 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const source = {
   chatWindow: readFileSync(path.join(here, "ChatWindow.tsx"), "utf8"),
   chatInput: readFileSync(path.join(here, "ChatInput.tsx"), "utf8"),
-  en: readFileSync(path.join(here, "..", "lib", "i18n", "messages", "en.ts"), "utf8"),
-  zh: readFileSync(path.join(here, "..", "lib", "i18n", "messages", "zh-CN.ts"), "utf8"),
+  useAgentSession: readFileSync(path.join(here, "..", "hooks", "useAgentSession.ts"), "utf8"),
+  globals: readFileSync(path.join(here, "..", "app", "globals.css"), "utf8"),
 };
 
-test("ChatWindow forwards a live run status to the composer", () => {
-  // The composer-level chip must be driven by agentRunning || bashRunning so
-  // a long conversation that scrolled the in-stream indicator out of view
-  // still shows current activity at the bottom.
-  assert.match(source.chatWindow, /streamStatus=\{/);
-  assert.match(source.chatWindow, /phaseLabel\(agentPhase, t\) \?\? t\("chat\.agentWorking"\)/);
-  assert.match(source.chatWindow, /t\("chat\.runningCommand"\)/);
+test("a retry restart clears the retry banner as soon as the new attempt streams", () => {
+  // pi emits auto_retry_start, sleeps, then restarts the answer; the
+  // auto_retry_end(success) only arrives when that answer COMPLETES. The UI
+  // must not show "retrying" over the entire retried response.
+  assert.match(source.useAgentSession, /case "message_start":[\s\S]*?setRetryInfo\(null\)/);
 });
 
-test("ChatInput renders the status chip only while streaming", () => {
-  assert.match(source.chatInput, /isStreaming && streamStatus/);
-  assert.match(source.chatInput, /aria-live="polite"/);
+test("ChatInput no longer carries a composer-level run-status strip", () => {
+  assert.doesNotMatch(source.chatInput, /streamStatus/);
+  assert.doesNotMatch(source.chatInput, /aria-live="polite"/);
 });
 
-test("agentWorking copy exists in both locales", () => {
-  assert.match(source.en, /"chat\.agentWorking": "Working…"/);
-  assert.match(source.zh, /"chat\.agentWorking": "正在处理…"/);
+test("ChatWindow no longer forwards streamStatus", () => {
+  assert.doesNotMatch(source.chatWindow, /streamStatus/);
+});
+
+test("streamed content shows a blinking caret while it renders", () => {
+  const md = readFileSync(path.join(here, "MarkdownBody.tsx"), "utf8");
+  // The cursor must appear only while the message is still streaming.
+  assert.match(md, /isStreaming && <span className="streaming-cursor"/);
+});
+
+test("streaming caret css exists with reduced-motion fallback", () => {
+  assert.match(source.globals, /\.streaming-cursor \{/);
+  assert.match(source.globals, /prefers-reduced-motion[\s\S]*?\.streaming-cursor \{ animation: none/);
 });
