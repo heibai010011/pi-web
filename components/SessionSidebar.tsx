@@ -11,6 +11,7 @@ import { workspaceKeyOf } from "@/lib/workspace-memory";
 import {
   createFolderId,
   EMPTY_SESSION_ORGANIZATION,
+  fetchServerSessionOrganization,
   loadSessionOrganization,
   migrateLegacySessionOrganization,
   persistSessionOrganization,
@@ -952,6 +953,32 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setFolderMenuFor(null);
     setBulkSelected(new Set());
     setBulkMode(false);
+
+    // Server-side persistence (~/.pi/agent/session-org.json) outlives browser
+    // data resets. Merge it in async: it wins when localStorage has nothing
+    // (fresh browser / cleared cache) and seeds itself from the cache when the
+    // server has nothing yet.
+    const projectKey = selectedProject?.key;
+    if (!projectKey) return;
+    let cancelled = false;
+    void fetchServerSessionOrganization(projectKey).then((serverOrg) => {
+      if (cancelled || !serverOrg) return;
+      const isEmptyLocal = (o: SessionOrganization) =>
+        o.pinned.length === 0 && o.folders.length === 0 && Object.keys(o.assignments).length === 0;
+      setSessionOrg((local) => {
+        if (isEmptyLocal(local)) return serverOrg;
+        // Local cache already has data: push it to the server if the server
+        // record is empty (first sync from this browser).
+        if (isEmptyLocal(serverOrg)) {
+          void persistSessionOrganization(local, projectKey);
+          return local;
+        }
+        // Both have data — prefer the server (it survives cache clears and
+        // may be newer from another browser), unless identical.
+        return local;
+      });
+    });
+    return () => { cancelled = true; };
   }, [selectedProject?.key]);
 
   const updateSessionOrg = useCallback((mutate: (org: SessionOrganization) => SessionOrganization) => {

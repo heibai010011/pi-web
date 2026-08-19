@@ -1,31 +1,23 @@
 /**
- * Browser-persisted session organization: pinned sessions and custom folders.
+ * Browser-side session organization: pinned sessions and custom folders.
  *
- * Storage shape (localStorage, one key):
- * {
- *   pinned: string[],              // session ids, most recent pin first
- *   folders: { id, name }[],       // user-created folders
- *   assignments: Record<sessionId, folderId>,
- *   collapsedFolders: string[],    // folder ids the user collapsed
- * }
+ * localStorage is the instant client cache (zero-latency UI); every change is
+ * also mirrored asynchronously to the server-side store
+ * (`~/.pi/agent/session-org.json`, keyed per project) so organization survives
+ * clearing browser data or switching browsers. On load, both sources merge:
+ * whichever has data wins when the other is empty.
  *
- * Everything is client-side metadata only — sessions keep living in
+ * Everything is metadata only — sessions keep living in
  * ~/.pi/agent/sessions and deleting a folder never touches session files.
  */
 
-export interface SessionFolder {
-  id: string;
-  name: string;
-}
+import { EMPTY_SESSION_ORGANIZATION, normalizeSessionOrganization, type SessionOrganization } from "./session-org-shape";
 
-export interface SessionOrganization {
-  pinned: string[];
-  folders: SessionFolder[];
-  assignments: Record<string, string>;
-  collapsedFolders: string[];
-}
+export { EMPTY_SESSION_ORGANIZATION, normalizeSessionOrganization };
+export type { SessionFolder, SessionOrganization } from "./session-org-shape";
 
 export const SESSION_ORG_STORAGE_KEY = "pi-web:session-organization";
+export const SESSION_ORG_SYNCED_FLAG = "syncedToServer";
 
 /**
  * Storage is scoped per project key so folders/pins created under one
@@ -58,40 +50,6 @@ export function migrateLegacySessionOrganization(projectKey: string | null | und
   }
 }
 
-export const EMPTY_SESSION_ORGANIZATION: SessionOrganization = {
-  pinned: [],
-  folders: [],
-  assignments: {},
-  collapsedFolders: [],
-};
-
-export function normalizeSessionOrganization(value: unknown): SessionOrganization | null {
-  if (!value || typeof value !== "object") return null;
-  const raw = value as Partial<SessionOrganization> & Record<string, unknown>;
-  const pinned = Array.isArray(raw.pinned)
-    ? raw.pinned.filter((id): id is string => typeof id === "string")
-    : null;
-  const folders = Array.isArray(raw.folders)
-    ? raw.folders.filter(
-        (f): f is SessionFolder =>
-          Boolean(f) && typeof f === "object"
-          && typeof (f as SessionFolder).id === "string"
-          && typeof (f as SessionFolder).name === "string",
-      )
-    : null;
-  const assignments = raw.assignments && typeof raw.assignments === "object" && !Array.isArray(raw.assignments)
-    ? Object.fromEntries(
-        Object.entries(raw.assignments as Record<string, unknown>)
-          .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-      )
-    : null;
-  const collapsedFolders = Array.isArray(raw.collapsedFolders)
-    ? raw.collapsedFolders.filter((id): id is string => typeof id === "string")
-    : null;
-  if (!pinned || !folders || !assignments || !collapsedFolders) return null;
-  return { pinned, folders, assignments, collapsedFolders };
-}
-
 export function loadSessionOrganization(projectKey: string | null | undefined): SessionOrganization {
   if (typeof window === "undefined") return EMPTY_SESSION_ORGANIZATION;
   try {
@@ -118,8 +76,36 @@ export function persistSessionOrganization(org: SessionOrganization, projectKey:
       collapsedFolders: org.collapsedFolders.filter((id) => folderIds.has(id)),
     };
     window.localStorage.setItem(sessionOrgStorageKey(projectKey), JSON.stringify(clean));
+    return void mirrorSessionOrgToServer(clean, projectKey);
   } catch {
     // ignore storage quota / privacy-mode errors
+  }
+}
+
+/** Async best-effort mirror to the server-side store; failures keep localStorage as source. */
+async function mirrorSessionOrgToServer(org: SessionOrganization, projectKey: string | null | undefined): Promise<void> {
+  if (!projectKey) return;
+  try {
+    await fetch("/api/session-org", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectKey, org }),
+    });
+  } catch {
+    // Server unreachable: localStorage cache still holds the data.
+  }
+}
+
+/** Merge server-side data with the local cache; local wins only when the server has nothing. */
+export async function fetchServerSessionOrganization(projectKey: string | null | undefined): Promise<SessionOrganization | null> {
+  if (!projectKey) return null;
+  try {
+    const res = await fetch(`/api/session-org?projectKey=${encodeURIComponent(projectKey)}`);
+    if (!res.ok) return null;
+    const data = await res.json() as { org?: unknown };
+    return normalizeSessionOrganization(data.org);
+  } catch {
+    return null;
   }
 }
 
