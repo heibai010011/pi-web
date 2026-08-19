@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { normalizeSessionOrganization } from "@/lib/session-org-shape";
-import { readSessionOrgProject, writeSessionOrgProject } from "@/lib/session-org-store";
+import { readSessionOrgProjectEntry, writeSessionOrgProject } from "@/lib/session-org-store";
 
 export const dynamic = "force-dynamic";
 
@@ -9,7 +9,7 @@ export async function GET(req: Request) {
   if (!projectKey) {
     return NextResponse.json({ error: "projectKey is required" }, { status: 400 });
   }
-  return NextResponse.json({ org: readSessionOrgProject(projectKey) });
+  return NextResponse.json(readSessionOrgProjectEntry(projectKey));
 }
 
 export async function PUT(req: Request) {

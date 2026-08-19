@@ -9,13 +9,18 @@ import { skillExpansionToCommand } from "@/lib/slash-display";
 import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import {
+  beginSessionOrganizationSync,
   createFolderId,
   EMPTY_SESSION_ORGANIZATION,
   fetchServerSessionOrganization,
+  hasDirtySessionOrganization,
   loadSessionOrganization,
+  markSessionOrganizationSynced,
   migrateLegacySessionOrganization,
+  normalizeSessionOrganization,
   persistSessionOrganization,
   sessionMatchesQuery,
+  sessionOrgStorageKey,
   type SessionFolder,
   type SessionOrganization,
 } from "@/lib/session-folders";
@@ -451,6 +456,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // Session organization: search, pin, folders, bulk selection.
   const [sessionQuery, setSessionQuery] = useState("");
   const [sessionOrg, setSessionOrg] = useState<SessionOrganization>(EMPTY_SESSION_ORGANIZATION);
+  const sessionOrgRef = useRef<SessionOrganization>(EMPTY_SESSION_ORGANIZATION);
+  const replaceSessionOrg = useCallback((org: SessionOrganization) => {
+    sessionOrgRef.current = org;
+    setSessionOrg(org);
+  }, []);
+  // While the first server read for a project is in flight, user mutations are
+  // replayed onto the returned server baseline. This prevents both lost edits
+  // and stale-cache resurrection.
+  const sessionOrgLoadingKeyRef = useRef<string | null>(null);
+  const pendingSessionOrgMutationsRef = useRef<Array<(org: SessionOrganization) => SessionOrganization>>([]);
+  const pendingExternalSessionOrgRef = useRef<SessionOrganization | null>(null);
   const [bulkMode, setBulkMode] = useState(false);
   const [bulkSelected, setBulkSelected] = useState<Set<string>>(() => new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -945,49 +961,112 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // workspaces reloads that workspace's set instead of sharing one global one.
   // Bulk selection and any open folder menu belong to the previous workspace's
   // rows, so reset both alongside.
-  useEffect(() => {
+  useLayoutEffect(() => {
     // Legacy global-key data migrates into whichever project the user opens
     // first after this update, exactly once.
-    migrateLegacySessionOrganization(selectedProject?.key);
-    setSessionOrg(loadSessionOrganization(selectedProject?.key));
+    const projectKey = selectedProject?.key;
+    migrateLegacySessionOrganization(projectKey);
+    const local = loadSessionOrganization(projectKey);
+    // Snapshot before this request starts. Mutations made while GET is in
+    // flight set dirty too, but are already represented by the replay queue
+    // and must not also make the post-mutation cache become the baseline.
+    const hadDirtyLocalBeforeSync = hasDirtySessionOrganization(projectKey);
+    replaceSessionOrg(local);
     setFolderMenuFor(null);
     setBulkSelected(new Set());
     setBulkMode(false);
+    pendingSessionOrgMutationsRef.current = [];
+    pendingExternalSessionOrgRef.current = null;
 
-    // Server-side persistence (~/.pi/agent/session-org.json) outlives browser
-    // data resets. Merge it in async: it wins when localStorage has nothing
-    // (fresh browser / cleared cache) and seeds itself from the cache when the
-    // server has nothing yet.
+    if (!projectKey) {
+      sessionOrgLoadingKeyRef.current = null;
+      return;
+    }
+    // Block mirror PUTs until the server baseline arrives. Any user action in
+    // this window is queued by updateSessionOrg and replayed below.
+    beginSessionOrganizationSync(projectKey);
+    sessionOrgLoadingKeyRef.current = projectKey;
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const finishServerSync = async () => {
+      const serverEntry = await fetchServerSessionOrganization(projectKey);
+      if (cancelled || sessionOrgLoadingKeyRef.current !== projectKey) return;
+      if (!serverEntry) {
+        // Do not blindly PUT after a failed GET: the unseen server record may
+        // be newer. Keep collecting local mutations and retry after recovery.
+        retryTimer = setTimeout(() => { void finishServerSync(); }, 2_500);
+        return;
+      }
+      // Existing server records (including deliberately empty ones) are
+      // authoritative unless a previous local upload is still dirty.
+      let resolved = serverEntry.exists && !hadDirtyLocalBeforeSync
+        ? serverEntry.org
+        : local;
+      if (pendingExternalSessionOrgRef.current) {
+        resolved = pendingExternalSessionOrgRef.current;
+      }
+      for (const mutate of pendingSessionOrgMutationsRef.current) {
+        resolved = mutate(resolved);
+      }
+      pendingSessionOrgMutationsRef.current = [];
+      pendingExternalSessionOrgRef.current = null;
+      sessionOrgLoadingKeyRef.current = null;
+      markSessionOrganizationSynced(projectKey);
+      persistSessionOrganization(resolved, projectKey);
+      replaceSessionOrg(resolved);
+    };
+    void finishServerSync();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (sessionOrgLoadingKeyRef.current === projectKey) {
+        sessionOrgLoadingKeyRef.current = null;
+        pendingSessionOrgMutationsRef.current = [];
+        pendingExternalSessionOrgRef.current = null;
+      }
+    };
+  }, [replaceSessionOrg, selectedProject?.key]);
+
+  // Storage events fire only in other documents. Adopting them keeps two open
+  // pi-web tabs from overwriting one another with stale in-memory state.
+  useEffect(() => {
     const projectKey = selectedProject?.key;
     if (!projectKey) return;
-    let cancelled = false;
-    void fetchServerSessionOrganization(projectKey).then((serverOrg) => {
-      if (cancelled || !serverOrg) return;
-      const isEmptyLocal = (o: SessionOrganization) =>
-        o.pinned.length === 0 && o.folders.length === 0 && Object.keys(o.assignments).length === 0;
-      setSessionOrg((local) => {
-        if (isEmptyLocal(local)) return serverOrg;
-        // Local cache already has data: push it to the server if the server
-        // record is empty (first sync from this browser).
-        if (isEmptyLocal(serverOrg)) {
-          void persistSessionOrganization(local, projectKey);
-          return local;
+    const storageKey = sessionOrgStorageKey(projectKey);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== storageKey) return;
+      if (event.newValue === null) {
+        if (sessionOrgLoadingKeyRef.current === projectKey) {
+          pendingExternalSessionOrgRef.current = EMPTY_SESSION_ORGANIZATION;
         }
-        // Both have data — prefer the server (it survives cache clears and
-        // may be newer from another browser), unless identical.
-        return local;
-      });
-    });
-    return () => { cancelled = true; };
-  }, [selectedProject?.key]);
+        replaceSessionOrg(EMPTY_SESSION_ORGANIZATION);
+        return;
+      }
+      try {
+        const incoming = normalizeSessionOrganization(JSON.parse(event.newValue));
+        if (incoming) {
+          if (sessionOrgLoadingKeyRef.current === projectKey) {
+            pendingExternalSessionOrgRef.current = incoming;
+          }
+          replaceSessionOrg(incoming);
+        }
+      } catch {
+        // Ignore malformed writes from extensions/old app versions.
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [replaceSessionOrg, selectedProject?.key]);
 
   const updateSessionOrg = useCallback((mutate: (org: SessionOrganization) => SessionOrganization) => {
-    setSessionOrg((prev) => {
-      const next = mutate(prev);
-      persistSessionOrganization(next, selectedProject?.key);
-      return next;
-    });
-  }, [selectedProject?.key]);
+    const projectKey = selectedProject?.key;
+    if (projectKey && sessionOrgLoadingKeyRef.current === projectKey) {
+      pendingSessionOrgMutationsRef.current.push(mutate);
+    }
+    const next = mutate(sessionOrgRef.current);
+    persistSessionOrganization(next, projectKey);
+    replaceSessionOrg(next);
+  }, [replaceSessionOrg, selectedProject?.key]);
 
   const togglePinned = useCallback((sessionId: string) => {
     updateSessionOrg((org) => ({

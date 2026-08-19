@@ -61,6 +61,53 @@ export function loadSessionOrganization(projectKey: string | null | undefined): 
   }
 }
 
+export function sessionOrgDirtyKey(projectKey: string): string {
+  return `pi-web:session-organization-dirty:${projectKey}`;
+}
+
+export function hasDirtySessionOrganization(projectKey: string | null | undefined): boolean {
+  if (typeof window === "undefined" || !projectKey) return false;
+  try {
+    return Boolean(window.localStorage.getItem(sessionOrgDirtyKey(projectKey)));
+  } catch {
+    return false;
+  }
+}
+
+function markSessionOrganizationDirty(projectKey: string): string | null {
+  try {
+    const token = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    window.localStorage.setItem(sessionOrgDirtyKey(projectKey), token);
+    return token;
+  } catch {
+    // localStorage persistence itself is best-effort.
+    return null;
+  }
+}
+
+/**
+ * First-contact gate for this page lifecycle. It deliberately is NOT stored
+ * in localStorage: every full page load must consult the server again so a
+ * change made from another browser is visible. Before first contact, edits
+ * remain in localStorage and join the initial merge instead of prematurely
+ * replacing the server record.
+ */
+const syncedProjects = new Set<string>();
+
+export function beginSessionOrganizationSync(projectKey: string): void {
+  syncedProjects.delete(projectKey);
+}
+
+export function hasSyncedSessionOrganization(projectKey: string | null | undefined): boolean {
+  return Boolean(projectKey && syncedProjects.has(projectKey));
+}
+
+export function markSessionOrganizationSynced(projectKey: string): void {
+  syncedProjects.add(projectKey);
+}
+
 export function persistSessionOrganization(org: SessionOrganization, projectKey: string | null | undefined): void {
   if (typeof window === "undefined") return;
   try {
@@ -76,34 +123,85 @@ export function persistSessionOrganization(org: SessionOrganization, projectKey:
       collapsedFolders: org.collapsedFolders.filter((id) => folderIds.has(id)),
     };
     window.localStorage.setItem(sessionOrgStorageKey(projectKey), JSON.stringify(clean));
-    return void mirrorSessionOrgToServer(clean, projectKey);
+    // Dirty is set immediately, even while the first GET is still in flight.
+    // If the page closes in that window, next load must keep this local edit
+    // instead of replacing it with an older server record.
+    const dirtyToken = projectKey ? markSessionOrganizationDirty(projectKey) : null;
+    // Mirror only after first contact completed: before that, the merge path
+    // owns the initial server write and a partial local record must not
+    // overwrite the server's.
+    if (projectKey && hasSyncedSessionOrganization(projectKey)) {
+      void mirrorSessionOrganizationToServer(clean, projectKey, dirtyToken);
+    }
   } catch {
     // ignore storage quota / privacy-mode errors
   }
 }
 
+/**
+ * Serialize full-record PUTs per project. Without this, rapid create/delete/
+ * bulk operations may finish out of order and an older request can overwrite
+ * the newest organization on disk.
+ */
+const mirrorQueues = new Map<string, Promise<void>>();
+const mirrorVersions = new Map<string, number>();
+
 /** Async best-effort mirror to the server-side store; failures keep localStorage as source. */
-async function mirrorSessionOrgToServer(org: SessionOrganization, projectKey: string | null | undefined): Promise<void> {
+export async function mirrorSessionOrganizationToServer(
+  org: SessionOrganization,
+  projectKey: string | null | undefined,
+  dirtyToken: string | null = null,
+): Promise<void> {
   if (!projectKey) return;
-  try {
-    await fetch("/api/session-org", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectKey, org }),
-    });
-  } catch {
-    // Server unreachable: localStorage cache still holds the data.
+  const version = (mirrorVersions.get(projectKey) ?? 0) + 1;
+  mirrorVersions.set(projectKey, version);
+  const previous = mirrorQueues.get(projectKey) ?? Promise.resolve();
+  let succeeded = false;
+  const current = previous.catch(() => undefined).then(async () => {
+    try {
+      const response = await fetch("/api/session-org", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectKey, org }),
+      });
+      succeeded = response.ok;
+    } catch {
+      // Server unreachable: localStorage cache and dirty flag retain the data.
+    }
+  });
+  mirrorQueues.set(projectKey, current);
+  await current;
+  if (mirrorQueues.get(projectKey) === current) mirrorQueues.delete(projectKey);
+  // Never let an older successful write clear the dirty marker for a newer
+  // queued update that has not reached disk yet.
+  if (succeeded && mirrorVersions.get(projectKey) === version && typeof window !== "undefined") {
+    try {
+      const dirtyKey = sessionOrgDirtyKey(projectKey);
+      // Cross-tab safe: never clear a newer token written by another tab.
+      if (dirtyToken && window.localStorage.getItem(dirtyKey) === dirtyToken) {
+        window.localStorage.removeItem(dirtyKey);
+      }
+    } catch {
+      // best-effort marker cleanup
+    }
   }
 }
 
 /** Merge server-side data with the local cache; local wins only when the server has nothing. */
-export async function fetchServerSessionOrganization(projectKey: string | null | undefined): Promise<SessionOrganization | null> {
+export interface ServerSessionOrganization {
+  exists: boolean;
+  org: SessionOrganization;
+}
+
+export async function fetchServerSessionOrganization(projectKey: string | null | undefined): Promise<ServerSessionOrganization | null> {
   if (!projectKey) return null;
   try {
     const res = await fetch(`/api/session-org?projectKey=${encodeURIComponent(projectKey)}`);
     if (!res.ok) return null;
-    const data = await res.json() as { org?: unknown };
-    return normalizeSessionOrganization(data.org);
+    const data = await res.json() as { exists?: unknown; org?: unknown };
+    const org = normalizeSessionOrganization(data.org);
+    if (!org || typeof data.exists !== "boolean") return null;
+    return { exists: data.exists, org };
   } catch {
     return null;
   }

@@ -52,14 +52,35 @@ function writeStore(store: SessionOrgStore, storePath: string): void {
   writePrivateFileAtomicSync(storePath, JSON.stringify(store, null, 2));
 }
 
+export interface SessionOrgProjectEntry {
+  exists: boolean;
+  org: SessionOrganization;
+}
+
+/**
+ * Load one project's organization and distinguish a missing project from an
+ * intentionally empty one. That distinction prevents an old browser cache
+ * from resurrecting folders the user deleted elsewhere.
+ */
+export function readSessionOrgProjectEntry(
+  projectKey: string | null | undefined,
+  storePath = getSessionOrgStorePath(),
+): SessionOrgProjectEntry {
+  if (!projectKey) return { exists: false, org: EMPTY_SESSION_ORGANIZATION };
+  const store = readStore(storePath);
+  const exists = Object.prototype.hasOwnProperty.call(store.projects, projectKey);
+  return {
+    exists,
+    org: normalizeSessionOrganization(store.projects[projectKey]) ?? EMPTY_SESSION_ORGANIZATION,
+  };
+}
+
 /** Load one project's organization (server-side). */
 export function readSessionOrgProject(
   projectKey: string | null | undefined,
   storePath = getSessionOrgStorePath(),
 ): SessionOrganization {
-  if (!projectKey) return EMPTY_SESSION_ORGANIZATION;
-  const store = readStore(storePath);
-  return normalizeSessionOrganization(store.projects[projectKey]) ?? EMPTY_SESSION_ORGANIZATION;
+  return readSessionOrgProjectEntry(projectKey, storePath).org;
 }
 
 /** Persist one project's organization (server-side). */
