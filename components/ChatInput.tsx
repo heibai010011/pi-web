@@ -81,6 +81,12 @@ interface Props {
   /** Streaming viewport anchor mode: "tail" (follow bottom) or "prompt-anchor" (pin prompt to top) */
   anchorMode?: ChatStreamAnchorMode;
   onAnchorModeChange?: (mode: ChatStreamAnchorMode) => void;
+  /**
+   * Live run status text (e.g. running tool name / waiting for model).
+   * Shown pinned above the composer so a long conversation that scrolled the
+   * in-stream indicator out of view still surfaces the current activity.
+   */
+  streamStatus?: string | null;
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
@@ -394,6 +400,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onBuiltinCommand,
   soundEnabled, onSoundToggle, onAudioUnlock,
   anchorMode, onAnchorModeChange,
+  streamStatus,
   onPromptWithStreamingBehavior,
   draftKey,
   cwd,
@@ -1501,6 +1508,41 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             }}
           >
             {compactError}
+          </div>
+        )}
+        {/* Live run status pinned above the composer — keeps the current
+            activity visible even when the conversation is very long and the
+            in-stream indicator has scrolled out of view. */}
+        {isStreaming && streamStatus && (
+          <div
+            aria-live="polite"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "4px 10px",
+              marginBottom: 6,
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              fontSize: 12,
+              color: "var(--text-muted)",
+              overflow: "hidden",
+            }}
+          >
+            <span
+              style={{
+                flexShrink: 0,
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: "var(--accent)",
+                animation: "pulse 1.5s ease-in-out infinite",
+              }}
+            />
+            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {streamStatus}
+            </span>
           </div>
         )}
         {/* Image previews */}

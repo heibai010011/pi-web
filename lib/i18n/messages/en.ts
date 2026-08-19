@@ -185,6 +185,7 @@ export const enLocale: LocalePlugin = {
     "chat.runningToolsMore": "Running {names} (+{count})...",
     "chat.waitingModel": "Waiting for model...",
     "chat.runningCommand": "Running command...",
+    "chat.agentWorking": "Working…",
     "chat.thinking": "Thinking...",
     "chat.processDetails": "Process details",
     "chat.message": "message",

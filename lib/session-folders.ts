@@ -27,6 +27,37 @@ export interface SessionOrganization {
 
 export const SESSION_ORG_STORAGE_KEY = "pi-web:session-organization";
 
+/**
+ * Storage is scoped per project key so folders/pins created under one
+ * workspace do not leak into another. The project key comes from the
+ * session list's project grouping (same identity as the sidebar filter).
+ */
+export function sessionOrgStorageKey(projectKey: string | null | undefined): string {
+  return projectKey ? `${SESSION_ORG_STORAGE_KEY}:${projectKey}` : SESSION_ORG_STORAGE_KEY;
+}
+
+/**
+ * One-time migration: organization data used to live in one global key. When
+ * per-project storage is empty but the legacy global key has data, move it in
+ * (for the project that currently owns the sessions it references) and drop
+ * the global key so it migrates exactly once.
+ */
+export function migrateLegacySessionOrganization(projectKey: string | null | undefined): void {
+  if (typeof window === "undefined") return;
+  try {
+    const legacy = window.localStorage.getItem(SESSION_ORG_STORAGE_KEY);
+    if (!legacy) return;
+    const targetKey = sessionOrgStorageKey(projectKey);
+    if (targetKey === SESSION_ORG_STORAGE_KEY) return; // no project scope: key already correct
+    if (!window.localStorage.getItem(targetKey)) {
+      window.localStorage.setItem(targetKey, legacy);
+    }
+    window.localStorage.removeItem(SESSION_ORG_STORAGE_KEY);
+  } catch {
+    // best-effort migration
+  }
+}
+
 export const EMPTY_SESSION_ORGANIZATION: SessionOrganization = {
   pinned: [],
   folders: [],
@@ -61,10 +92,10 @@ export function normalizeSessionOrganization(value: unknown): SessionOrganizatio
   return { pinned, folders, assignments, collapsedFolders };
 }
 
-export function loadSessionOrganization(): SessionOrganization {
+export function loadSessionOrganization(projectKey: string | null | undefined): SessionOrganization {
   if (typeof window === "undefined") return EMPTY_SESSION_ORGANIZATION;
   try {
-    const raw = window.localStorage.getItem(SESSION_ORG_STORAGE_KEY);
+    const raw = window.localStorage.getItem(sessionOrgStorageKey(projectKey));
     if (!raw) return EMPTY_SESSION_ORGANIZATION;
     return normalizeSessionOrganization(JSON.parse(raw)) ?? EMPTY_SESSION_ORGANIZATION;
   } catch {
@@ -72,7 +103,7 @@ export function loadSessionOrganization(): SessionOrganization {
   }
 }
 
-export function persistSessionOrganization(org: SessionOrganization): void {
+export function persistSessionOrganization(org: SessionOrganization, projectKey: string | null | undefined): void {
   if (typeof window === "undefined") return;
   try {
     // Drop assignments pointing at folders that no longer exist so the
@@ -86,7 +117,7 @@ export function persistSessionOrganization(org: SessionOrganization): void {
       ),
       collapsedFolders: org.collapsedFolders.filter((id) => folderIds.has(id)),
     };
-    window.localStorage.setItem(SESSION_ORG_STORAGE_KEY, JSON.stringify(clean));
+    window.localStorage.setItem(sessionOrgStorageKey(projectKey), JSON.stringify(clean));
   } catch {
     // ignore storage quota / privacy-mode errors
   }

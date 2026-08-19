@@ -12,6 +12,7 @@ import {
   createFolderId,
   EMPTY_SESSION_ORGANIZATION,
   loadSessionOrganization,
+  migrateLegacySessionOrganization,
   persistSessionOrganization,
   sessionMatchesQuery,
   type SessionFolder,
@@ -454,72 +455,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [folderMenuFor, setFolderMenuFor] = useState<string | null>(null);
 
-  useEffect(() => {
-    setSessionOrg(loadSessionOrganization());
-  }, []);
-
-  const updateSessionOrg = useCallback((mutate: (org: SessionOrganization) => SessionOrganization) => {
-    setSessionOrg((prev) => {
-      const next = mutate(prev);
-      persistSessionOrganization(next);
-      return next;
-    });
-  }, []);
-
-  const togglePinned = useCallback((sessionId: string) => {
-    updateSessionOrg((org) => ({
-      ...org,
-      pinned: org.pinned.includes(sessionId)
-        ? org.pinned.filter((id) => id !== sessionId)
-        : [sessionId, ...org.pinned],
-    }));
-  }, [updateSessionOrg]);
-
-  const createFolder = useCallback((name: string) => {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    const folder: SessionFolder = { id: createFolderId(), name: trimmed };
-    updateSessionOrg((org) => ({ ...org, folders: [...org.folders, folder] }));
-  }, [updateSessionOrg]);
-
-  const renameFolder = useCallback((folderId: string, name: string) => {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    updateSessionOrg((org) => ({
-      ...org,
-      folders: org.folders.map((f) => (f.id === folderId ? { ...f, name: trimmed } : f)),
-    }));
-  }, [updateSessionOrg]);
-
-  const deleteFolder = useCallback((folderId: string) => {
-    // Sessions inside fall back to the ungrouped list; nothing is deleted.
-    updateSessionOrg((org) => ({
-      ...org,
-      folders: org.folders.filter((f) => f.id !== folderId),
-      assignments: Object.fromEntries(
-        Object.entries(org.assignments).filter(([, fid]) => fid !== folderId),
-      ),
-      collapsedFolders: org.collapsedFolders.filter((id) => id !== folderId),
-    }));
-  }, [updateSessionOrg]);
-
-  const moveSessionToFolder = useCallback((sessionId: string, folderId: string | null) => {
-    updateSessionOrg((org) => {
-      const assignments = { ...org.assignments };
-      if (folderId === null) delete assignments[sessionId];
-      else assignments[sessionId] = folderId;
-      return { ...org, assignments };
-    });
-  }, [updateSessionOrg]);
-
-  const toggleFolderCollapsed = useCallback((folderId: string) => {
-    updateSessionOrg((org) => ({
-      ...org,
-      collapsedFolders: org.collapsedFolders.includes(folderId)
-        ? org.collapsedFolders.filter((id) => id !== folderId)
-        : [...org.collapsedFolders, folderId],
-    }));
-  }, [updateSessionOrg]);
+  // (Organization effect + handlers live after `selectedProject` is defined —
+  // they are scoped per workspace and need its key.)
 
   const exitBulkMode = useCallback(() => {
     setBulkMode(false);
@@ -569,28 +506,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       if (showLoading) setLoading(false);
     }
   }, []);
-
-  const bulkDelete = useCallback(async () => {
-    if (bulkDeleting) return;
-    // Running sessions are protected: never delete one mid-run.
-    const targets = [...bulkSelected].filter((id) => !runningSessionIds.has(id));
-    if (targets.length === 0) return;
-    setBulkDeleting(true);
-    try {
-      for (const id of targets) {
-        try {
-          await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
-          onSessionDeleted?.(id);
-        } catch {
-          // continue with the rest
-        }
-      }
-      loadSessions();
-    } finally {
-      setBulkDeleting(false);
-      exitBulkMode();
-    }
-  }, [bulkDeleting, bulkSelected, runningSessionIds, onSessionDeleted, loadSessions, exitBulkMode]);
 
   const initialLoadDone = useRef(false);
   useEffect(() => {
@@ -1025,6 +940,114 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // Sessions of every worktree in the selected project are shown together
   const selectedProject = projectFor(selectedCwd);
 
+  // Session organization (pins/folders) is scoped per project key: switching
+  // workspaces reloads that workspace's set instead of sharing one global one.
+  // Bulk selection and any open folder menu belong to the previous workspace's
+  // rows, so reset both alongside.
+  useEffect(() => {
+    // Legacy global-key data migrates into whichever project the user opens
+    // first after this update, exactly once.
+    migrateLegacySessionOrganization(selectedProject?.key);
+    setSessionOrg(loadSessionOrganization(selectedProject?.key));
+    setFolderMenuFor(null);
+    setBulkSelected(new Set());
+    setBulkMode(false);
+  }, [selectedProject?.key]);
+
+  const updateSessionOrg = useCallback((mutate: (org: SessionOrganization) => SessionOrganization) => {
+    setSessionOrg((prev) => {
+      const next = mutate(prev);
+      persistSessionOrganization(next, selectedProject?.key);
+      return next;
+    });
+  }, [selectedProject?.key]);
+
+  const togglePinned = useCallback((sessionId: string) => {
+    updateSessionOrg((org) => ({
+      ...org,
+      pinned: org.pinned.includes(sessionId)
+        ? org.pinned.filter((id) => id !== sessionId)
+        : [sessionId, ...org.pinned],
+    }));
+  }, [updateSessionOrg]);
+
+  const createFolder = useCallback((name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const folder: SessionFolder = { id: createFolderId(), name: trimmed };
+    updateSessionOrg((org) => ({ ...org, folders: [...org.folders, folder] }));
+  }, [updateSessionOrg]);
+
+  const renameFolder = useCallback((folderId: string, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    updateSessionOrg((org) => ({
+      ...org,
+      folders: org.folders.map((f) => (f.id === folderId ? { ...f, name: trimmed } : f)),
+    }));
+  }, [updateSessionOrg]);
+
+  const deleteFolder = useCallback((folderId: string) => {
+    // Sessions inside fall back to the ungrouped list; nothing is deleted.
+    updateSessionOrg((org) => ({
+      ...org,
+      folders: org.folders.filter((f) => f.id !== folderId),
+      assignments: Object.fromEntries(
+        Object.entries(org.assignments).filter(([, fid]) => fid !== folderId),
+      ),
+      collapsedFolders: org.collapsedFolders.filter((id) => id !== folderId),
+    }));
+  }, [updateSessionOrg]);
+
+  const moveSessionToFolder = useCallback((sessionId: string, folderId: string | null) => {
+    updateSessionOrg((org) => {
+      const assignments = { ...org.assignments };
+      if (folderId === null) delete assignments[sessionId];
+      else assignments[sessionId] = folderId;
+      return { ...org, assignments };
+    });
+  }, [updateSessionOrg]);
+
+  const toggleFolderCollapsed = useCallback((folderId: string) => {
+    updateSessionOrg((org) => ({
+      ...org,
+      collapsedFolders: org.collapsedFolders.includes(folderId)
+        ? org.collapsedFolders.filter((id) => id !== folderId)
+        : [...org.collapsedFolders, folderId],
+    }));
+  }, [updateSessionOrg]);
+
+  const bulkDelete = useCallback(async () => {
+    if (bulkDeleting) return;
+    // Running sessions are protected: never delete one mid-run.
+    const targets = [...bulkSelected].filter((id) => !runningSessionIds.has(id));
+    if (targets.length === 0) return;
+    setBulkDeleting(true);
+    try {
+      for (const id of targets) {
+        try {
+          await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+          onSessionDeleted?.(id);
+          // Drop the deleted session from organization metadata too, so
+          // stale pinned/assignment entries do not accumulate.
+          updateSessionOrg((org) => ({
+            ...org,
+            pinned: org.pinned.filter((p) => p !== id),
+            assignments: Object.fromEntries(
+              Object.entries(org.assignments).filter(([sid]) => sid !== id),
+            ),
+          }));
+        } catch {
+          // continue with the rest
+        }
+      }
+      loadSessions();
+    } finally {
+      setBulkDeleting(false);
+      exitBulkMode();
+    }
+  }, [bulkDeleting, bulkSelected, runningSessionIds, onSessionDeleted, loadSessions, exitBulkMode, updateSessionOrg]);
+
   // Per-project activity counts (running / unread) for the workspace selector.
   // Uses the same stable server key as the project list and filtering.
   const projectActivity = useMemo(
@@ -1133,6 +1156,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       onRenamed={loadSessions}
       onDeleted={(id) => {
         onSessionDeleted?.(id);
+        // Also purge organization references so a deleted session does not
+        // linger in pinned/assignment metadata.
+        updateSessionOrg((org) => ({
+          ...org,
+          pinned: org.pinned.filter((p) => p !== id),
+          assignments: Object.fromEntries(
+            Object.entries(org.assignments).filter(([sid]) => sid !== id),
+          ),
+        }));
         loadSessions();
       }}
       depth={depth}
@@ -2544,6 +2576,7 @@ function SessionItem({
 
   // Close the folder dropdown on any outside click / Escape while it is open.
   const folderMenuRef = useRef<HTMLDivElement | null>(null);
+  const folderMenuRowRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!folderMenuOpen) return;
     const handlePointerDown = (e: PointerEvent) => {
@@ -2554,12 +2587,19 @@ function SessionItem({
     const closeFolderMenuOnKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onFolderMenuFor?.(null);
     };
-    // The dropdown is fixed at coordinates captured when it opened; any scroll
-    // of the list would detach it from its anchor, so close instead.
-    const closeFolderMenuOnScroll = () => onFolderMenuFor?.(null);
+    // The dropdown is fixed at coordinates captured when it opened; scrolling
+    // a container that contains the trigger row would detach it from its
+    // anchor, so close then. The chat pane's streaming auto-follow scrolls a
+    // container outside this row and must NOT close the menu.
+    const rowEl = folderMenuRowRef.current;
+    const closeFolderMenuOnScroll = (e: Event) => {
+      const scrolled = e.target as Node | null;
+      if (rowEl && scrolled instanceof Node && !rowEl.contains(scrolled)) return;
+      onFolderMenuFor?.(null);
+    };
     document.addEventListener("pointerdown", handlePointerDown, true);
     document.addEventListener("keydown", closeFolderMenuOnKey, true);
-    window.addEventListener("scroll", closeFolderMenuOnScroll, true);
+    window.addEventListener("scroll", closeFolderMenuOnScroll, { capture: true, passive: true });
     return () => {
       document.removeEventListener("pointerdown", handlePointerDown, true);
       document.removeEventListener("keydown", closeFolderMenuOnKey, true);
@@ -2660,6 +2700,7 @@ function SessionItem({
 
   return (
     <div
+      ref={folderMenuRowRef}
       onClick={confirmDelete || renaming ? undefined : onClick}
       onContextMenu={confirmDelete || renaming ? undefined : handleContextMenu}
       onMouseEnter={() => setHovered(true)}
