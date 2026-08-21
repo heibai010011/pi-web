@@ -138,6 +138,7 @@ export const enLocale: LocalePlugin = {
     "sidebar.moveToFolder": "Move to folder",
     "sidebar.noFoldersYet": "No folders yet — create one below",
     "sidebar.newFolder": "New folder",
+    "sidebar.newSessionInFolder": "New session in this folder",
     "sidebar.folderName": "Folder name",
     "sidebar.renameFolder": "Rename folder",
     "sidebar.deleteFolder": "Delete folder (sessions are kept)",

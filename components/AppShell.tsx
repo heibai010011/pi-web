@@ -20,6 +20,7 @@ import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
+import { discardSessionFolderDraft, promoteSessionFolderDraft } from "@/lib/session-folder-drafts";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import {
@@ -528,6 +529,7 @@ export function AppShell() {
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     setNewSessionDraftId(draftId);
+    discardSessionFolderDraft(activeNewSessionDraftKeyRef.current);
     activeNewSessionDraftKeyRef.current = `new:${draftId}:${cwd}`;
     setSelectedSession(null);
     setNewSessionCwd((prev) => {
@@ -555,6 +557,7 @@ export function AppShell() {
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     invalidateWorkspaceRestore();
+    discardSessionFolderDraft(activeNewSessionDraftKeyRef.current);
     activeNewSessionDraftKeyRef.current = null;
     // Re-clicking the already-open session must not remount the chat and
     // re-run the full load/positioning cycle. Only skip when the effective
@@ -590,6 +593,7 @@ export function AppShell() {
 
   const handleNewSession = useCallback((sessionId: string, cwd: string) => {
     invalidateWorkspaceRestore();
+    discardSessionFolderDraft(activeNewSessionDraftKeyRef.current);
     const draftKey = `new:${sessionId}:${cwd}`;
     activeNewSessionDraftKeyRef.current = draftKey;
     setNewSessionDraftId(sessionId);
@@ -632,6 +636,7 @@ export function AppShell() {
 
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo, sourceDraftKey: string) => {
+    promoteSessionFolderDraft(sourceDraftKey, session.id);
     setRefreshKey((k) => k + 1);
     if (activeNewSessionDraftKeyRef.current !== sourceDraftKey) return;
     invalidateWorkspaceRestore();

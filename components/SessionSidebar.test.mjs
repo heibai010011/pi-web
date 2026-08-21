@@ -93,3 +93,9 @@ test("every session delete path purges or hands down organization metadata", () 
   assert.match(source, /const handleDeletedSessionOrganization[\s\S]*?removeSessionOrganizationReferences\(org, id, filteredSessions\)/);
   assert.match(source, /onSessionDeleted=\{handleDeletedSessionOrganization\}/);
 });
+
+test("folder rows can create a draft session directly in that folder", () => {
+  assert.match(source, /onNewSession=\{\(\) => handleNewSessionInFolder\(folder\.id\)\}/);
+  assert.match(source, /registerSessionFolderDraft\(draftKey, selectedProject\.key, folderId, temporarySessionId\);\s*onNewSession\?\.\(temporarySessionId, selectedCwd\);/);
+  assert.match(source, /title=\{t\("sidebar\.newSessionInFolder"\)\}/);
+});

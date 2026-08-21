@@ -9,6 +9,7 @@ import { skillExpansionToCommand } from "@/lib/slash-display";
 import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { countSessionTreeNodes, groupSessionTrees, removeSessionOrganizationReferences } from "@/lib/session-tree-groups";
+import { registerSessionFolderDraft, SESSION_ORGANIZATION_CHANGED_EVENT } from "@/lib/session-folder-drafts";
 import {
   beginSessionOrganizationSync,
   createFolderId,
@@ -940,15 +941,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     onSelectSession(s);
   }, [onSelectSession]);
 
+  const createTemporarySessionId = () => (
+    typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
+  );
+
   const handleNewSession = useCallback(() => {
     if (!selectedCwd) return;
-    // Generate a temporary UUID client-side — no backend call needed.
-    // Pi will be spawned lazily when the user sends the first message.
-    const tempId = typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID()
-      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
-    onNewSession?.(tempId, selectedCwd);
+    // Pi is spawned lazily when the user sends the first message.
+    onNewSession?.(createTemporarySessionId(), selectedCwd);
   }, [selectedCwd, onNewSession]);
+
 
   const recentProjects = getRecentProjects(allSessions);
   const showProjectFilter = recentProjects.length > 8;
@@ -1029,6 +1033,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     };
   }, [replaceSessionOrg, selectedProject?.key]);
 
+  // Same-window draft promotion does not emit a native storage event. Adopt
+  // the promoted real session id immediately so it appears in its folder as
+  // soon as the first prompt creates the persisted session.
+  useEffect(() => {
+    const projectKey = selectedProject?.key;
+    if (!projectKey) return;
+    const onOrganizationChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ projectKey?: string; org?: unknown }>).detail;
+      if (detail?.projectKey !== projectKey) return;
+      const incoming = normalizeSessionOrganization(detail.org);
+      if (incoming) replaceSessionOrg(incoming);
+    };
+    window.addEventListener(SESSION_ORGANIZATION_CHANGED_EVENT, onOrganizationChanged);
+    return () => window.removeEventListener(SESSION_ORGANIZATION_CHANGED_EVENT, onOrganizationChanged);
+  }, [replaceSessionOrg, selectedProject?.key]);
+
   // Storage events fire only in other documents. Adopting them keeps two open
   // pi-web tabs from overwriting one another with stale in-memory state.
   useEffect(() => {
@@ -1069,6 +1089,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     persistSessionOrganization(next, projectKey);
     replaceSessionOrg(next);
   }, [replaceSessionOrg, selectedProject?.key]);
+
+  const handleNewSessionInFolder = useCallback((folderId: string) => {
+    if (!selectedCwd || !selectedProject?.key) return;
+    const temporarySessionId = createTemporarySessionId();
+    const draftKey = `new:${temporarySessionId}:${selectedCwd}`;
+    // Register and persist before AppShell switches the active composer; that
+    // state transition may synchronously re-render/unmount this sidebar path.
+    registerSessionFolderDraft(draftKey, selectedProject.key, folderId, temporarySessionId);
+    onNewSession?.(temporarySessionId, selectedCwd);
+  }, [onNewSession, selectedCwd, selectedProject?.key]);
 
   const togglePinned = useCallback((sessionId: string) => {
     updateSessionOrg((org) => ({
@@ -2076,6 +2106,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 onToggle={() => toggleFolderCollapsed(folder.id)}
                 onRename={(name) => renameFolder(folder.id, name)}
                 onDelete={() => deleteFolder(folder.id)}
+                onNewSession={() => handleNewSessionInFolder(folder.id)}
               />
               {!collapsed && trees.map((node) => renderSessionTree(node, 1))}
             </div>
@@ -2515,6 +2546,7 @@ function FolderRow({
   onToggle,
   onRename,
   onDelete,
+  onNewSession,
 }: {
   folder: SessionFolder;
   count: number;
@@ -2522,6 +2554,7 @@ function FolderRow({
   onToggle: () => void;
   onRename: (name: string) => void;
   onDelete: () => void;
+  onNewSession: () => void;
 }) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
@@ -2605,9 +2638,22 @@ function FolderRow({
         {folder.name}
       </span>
       <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0, fontFamily: "var(--font-mono)" }}>{count}</span>
-      {hovered && (
-        <div style={{ display: "flex", gap: 3, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+      <div
+        style={{ display: "flex", gap: 3, flexShrink: 0 }}
+        onClick={(e) => e.stopPropagation()}
+      >
           <button
+            onClick={onNewSession}
+            title={t("sidebar.newSessionInFolder")}
+            aria-label={t("sidebar.newSessionInFolder")}
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+          </button>
+          {hovered && <button
             onClick={() => { renameCommittedRef.current = false; setRenameValue(folder.name); setRenaming(true); }}
             title={t("sidebar.renameFolder")}
             style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
@@ -2615,8 +2661,8 @@ function FolderRow({
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
             </svg>
-          </button>
-          <button
+          </button>}
+          {hovered && <button
             onClick={() => setConfirmDelete(true)}
             title={t("sidebar.deleteFolder")}
             style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
@@ -2625,9 +2671,8 @@ function FolderRow({
               <polyline points="3 6 5 6 21 6" />
               <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
             </svg>
-          </button>
+          </button>}
         </div>
-      )}
     </div>
   );
 }

@@ -138,6 +138,7 @@ export const zhCNLocale: LocalePlugin = {
     "sidebar.moveToFolder": "移入文件夹",
     "sidebar.noFoldersYet": "还没有文件夹，先创建一个",
     "sidebar.newFolder": "新建文件夹",
+    "sidebar.newSessionInFolder": "在此文件夹中新建会话",
     "sidebar.folderName": "文件夹名称",
     "sidebar.renameFolder": "重命名文件夹",
     "sidebar.deleteFolder": "删除文件夹（会话保留）",
