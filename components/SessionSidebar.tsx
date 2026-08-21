@@ -415,6 +415,9 @@ function PiWebTitle() {
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  // Successful DELETEs disappear optimistically. Keep ids tombstoned across
+  // stale in-flight list responses until the server confirms they are absent.
+  const deletedSessionTombstonesRef = useRef<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
@@ -501,14 +504,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[] };
-      setAllSessions(data.sessions);
+      // Session ids are immutable and never reused, so tombstones live for the
+      // sidebar lifetime. Releasing one after a confirming response would let
+      // an older request that resolves later resurrect the deleted row.
+      const visibleSessions = deletedSessionTombstonesRef.current.size === 0
+        ? data.sessions
+        : data.sessions.filter((session) => !deletedSessionTombstonesRef.current.has(session.id));
+      setAllSessions(visibleSessions);
       // Treat the fetched running set as an initial fallback only. Once the
       // lightweight poll is live, a slow session-list fetch cannot overwrite it.
       if (!runningPollAuthoritativeRef.current) {
         setRunningSessionIds(new Set(data.runningSessionIds ?? []));
       }
       // Drop unread markers for sessions that no longer exist (e.g. deleted).
-      const existingIds = new Set(data.sessions.map((s) => s.id));
+      const existingIds = new Set(visibleSessions.map((s) => s.id));
       setUnreadSessionIds((prev) => {
         if (prev.size === 0) return prev;
         const next = new Set([...prev].filter((id) => existingIds.has(id)));
@@ -1156,6 +1165,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }));
   }, [updateSessionOrg]);
 
+  const hideDeletedSession = useCallback((sessionId: string) => {
+    deletedSessionTombstonesRef.current.add(sessionId);
+    // Remove from every rendered view in the same commit before organization
+    // cleanup can make the still-present row appear under Ungrouped.
+    setAllSessions((sessions) => sessions.filter((session) => session.id !== sessionId));
+    setUnreadSessionIds((ids) => {
+      if (!ids.has(sessionId)) return ids;
+      const next = new Set(ids);
+      next.delete(sessionId);
+      return next;
+    });
+    setFolderMenuFor((id) => (id === sessionId ? null : id));
+  }, []);
+
   const bulkDelete = useCallback(async () => {
     if (bulkDeleting) return;
     // Running sessions are protected: never delete one mid-run.
@@ -1184,6 +1207,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         try {
           const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
           if (!response.ok) continue;
+          hideDeletedSession(id);
           onSessionDeleted?.(id);
           // Preserve organization for surviving/reparented children while
           // removing the deleted session's own references.
@@ -1197,7 +1221,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       setBulkDeleting(false);
       exitBulkMode();
     }
-  }, [allSessions, bulkDeleting, bulkSelected, runningSessionIds, onSessionDeleted, loadSessions, exitBulkMode, updateSessionOrg]);
+  }, [allSessions, bulkDeleting, bulkSelected, runningSessionIds, hideDeletedSession, onSessionDeleted, loadSessions, exitBulkMode, updateSessionOrg]);
 
   // Per-project activity counts (running / unread) for the workspace selector.
   // Uses the same stable server key as the project list and filtering.
@@ -1288,6 +1312,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const ungroupedTree = groupedTrees.ungrouped;
 
   const handleDeletedSessionOrganization = (id: string) => {
+    hideDeletedSession(id);
     onSessionDeleted?.(id);
     // Every rendering path (pinned, folder, ungrouped tree) uses this cleanup.
     // Keeping it centralized prevents invisible stale assignments after a

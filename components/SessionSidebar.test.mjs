@@ -94,6 +94,16 @@ test("every session delete path purges or hands down organization metadata", () 
   assert.match(source, /onSessionDeleted=\{handleDeletedSessionOrganization\}/);
 });
 
+test("successful deletion hides the row before cleaning folder organization", () => {
+  assert.match(source, /const handleDeletedSessionOrganization = \(id: string\) => \{\s*hideDeletedSession\(id\);\s*onSessionDeleted\?\.\(id\);[\s\S]*?updateSessionOrg/);
+  assert.match(source, /if \(!response\.ok\) continue;\s*hideDeletedSession\(id\);\s*onSessionDeleted\?\.\(id\);/);
+});
+
+test("deleted-session tombstones filter stale session-list responses", () => {
+  assert.match(source, /data\.sessions\.filter\(\(session\) => !deletedSessionTombstonesRef\.current\.has\(session\.id\)\)/);
+  assert.doesNotMatch(source, /deletedSessionTombstonesRef\.current\.delete/);
+});
+
 test("folder rows can create a draft session directly in that folder", () => {
   assert.match(source, /onNewSession=\{\(\) => handleNewSessionInFolder\(folder\.id\)\}/);
   assert.match(source, /registerSessionFolderDraft\(draftKey, selectedProject\.key, folderId, temporarySessionId\);\s*onNewSession\?\.\(temporarySessionId, selectedCwd\);/);
