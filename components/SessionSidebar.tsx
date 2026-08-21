@@ -8,6 +8,7 @@ import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
+import { countSessionTreeNodes, groupSessionTrees, removeSessionOrganizationReferences } from "@/lib/session-tree-groups";
 import {
   beginSessionOrganizationSync,
   createFolderId,
@@ -20,6 +21,7 @@ import {
   normalizeSessionOrganization,
   persistSessionOrganization,
   sessionMatchesQuery,
+  SESSION_ORG_UNGROUPED,
   sessionOrgStorageKey,
   type SessionFolder,
   type SessionOrganization,
@@ -1077,11 +1079,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }));
   }, [updateSessionOrg]);
 
-  const createFolder = useCallback((name: string) => {
+  const createFolder = useCallback((name: string): string | null => {
     const trimmed = name.trim();
-    if (!trimmed) return;
+    if (!trimmed) return null;
     const folder: SessionFolder = { id: createFolderId(), name: trimmed };
     updateSessionOrg((org) => ({ ...org, folders: [...org.folders, folder] }));
+    return folder.id;
   }, [updateSessionOrg]);
 
   const renameFolder = useCallback((folderId: string, name: string) => {
@@ -1108,7 +1111,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const moveSessionToFolder = useCallback((sessionId: string, folderId: string | null) => {
     updateSessionOrg((org) => {
       const assignments = { ...org.assignments };
-      if (folderId === null) delete assignments[sessionId];
+      if (folderId === null) assignments[sessionId] = SESSION_ORG_UNGROUPED;
       else assignments[sessionId] = folderId;
       return { ...org, assignments };
     });
@@ -1128,21 +1131,33 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     // Running sessions are protected: never delete one mid-run.
     const targets = [...bulkSelected].filter((id) => !runningSessionIds.has(id));
     if (targets.length === 0) return;
+    // Delete ancestors before descendants so each parent's effective
+    // organization can be handed down through the chain before the child is
+    // removed in turn.
+    const sessionById = new Map(allSessions.map((session) => [session.id, session]));
+    const targetIds = new Set(targets);
+    const targetDepth = (id: string) => {
+      let depth = 0;
+      let parentId = sessionById.get(id)?.parentSessionId;
+      const visited = new Set<string>();
+      while (parentId && targetIds.has(parentId) && !visited.has(parentId)) {
+        visited.add(parentId);
+        depth += 1;
+        parentId = sessionById.get(parentId)?.parentSessionId;
+      }
+      return depth;
+    };
+    targets.sort((a, b) => targetDepth(a) - targetDepth(b));
     setBulkDeleting(true);
     try {
       for (const id of targets) {
         try {
-          await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+          const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+          if (!response.ok) continue;
           onSessionDeleted?.(id);
-          // Drop the deleted session from organization metadata too, so
-          // stale pinned/assignment entries do not accumulate.
-          updateSessionOrg((org) => ({
-            ...org,
-            pinned: org.pinned.filter((p) => p !== id),
-            assignments: Object.fromEntries(
-              Object.entries(org.assignments).filter(([sid]) => sid !== id),
-            ),
-          }));
+          // Preserve organization for surviving/reparented children while
+          // removing the deleted session's own references.
+          updateSessionOrg((org) => removeSessionOrganizationReferences(org, id, allSessions));
         } catch {
           // continue with the rest
         }
@@ -1152,7 +1167,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       setBulkDeleting(false);
       exitBulkMode();
     }
-  }, [bulkDeleting, bulkSelected, runningSessionIds, onSessionDeleted, loadSessions, exitBulkMode, updateSessionOrg]);
+  }, [allSessions, bulkDeleting, bulkSelected, runningSessionIds, onSessionDeleted, loadSessions, exitBulkMode, updateSessionOrg]);
 
   // Per-project activity counts (running / unread) for the workspace selector.
   // Uses the same stable server key as the project list and filtering.
@@ -1209,80 +1224,69 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         }
       : null);
 
-  // Build parent-child tree within the filtered set. While searching or in
-  // bulk mode, show a flat list — folders/pins are about organizing the
-  // browsing view, not about constraining search results.
+  // While searching or bulk-selecting, folders/pins are intentionally ignored
+  // and results are flat. In browsing mode, group the COMPLETE parent/child
+  // tree instead of filtering individual rows first: an unassigned subagent
+  // inherits its parent's folder/pinned group and stays nested beneath it.
   const flatList = hasSearchQuery || bulkMode;
   const sessionTree = flatList
     ? searchedSessions.map((s) => ({ session: s, children: [] as SessionTreeNode[] }))
     : buildSessionTree(searchedSessions);
-  // Folder grouping (browsing mode only): pinned first, then folders with
-  // their sessions, then the ungrouped tree.
   const pinnedIds = useMemo(
     () => new Set(flatList ? [] : sessionOrg.pinned.filter((id) => searchedSessions.some((s) => s.id === id))),
     [flatList, sessionOrg.pinned, searchedSessions],
   );
-  const pinnedSessions = useMemo(
-    () => (flatList ? [] : [...pinnedIds].map((id) => searchedSessions.find((s) => s.id === id)!).filter(Boolean)),
-    [flatList, pinnedIds, searchedSessions],
-  );
-  const folderContents = useMemo(() => {
-    const map = new Map<string, SessionInfo[]>();
-    if (flatList) return map;
-    for (const folder of sessionOrg.folders) map.set(folder.id, []);
-    for (const s of searchedSessions) {
-      if (pinnedIds.has(s.id)) continue;
-      const fid = sessionOrg.assignments[s.id];
-      if (fid && map.has(fid)) {
-        map.get(fid)!.push(s);
-        // Mark as consumed so the ungrouped tree excludes it.
-      }
+  const groupedTrees = useMemo(() => {
+    if (flatList) {
+      return {
+        pinned: [],
+        folders: new Map<string, SessionTreeNode[]>(),
+        ungrouped: sessionTree,
+        effectiveFolderBySessionId: new Map<string, string | null>(),
+      };
     }
-    return map;
-  }, [flatList, sessionOrg.folders, sessionOrg.assignments, searchedSessions, pinnedIds]);
-  const folderAssignedIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const list of folderContents.values()) for (const s of list) ids.add(s.id);
-    return ids;
-  }, [folderContents]);
-  const ungroupedTree = useMemo(
-    () => (flatList ? sessionTree : buildSessionTree(searchedSessions.filter((s) => !pinnedIds.has(s.id) && !folderAssignedIds.has(s.id)))),
-    [flatList, sessionTree, searchedSessions, pinnedIds, folderAssignedIds],
-  );
+    return groupSessionTrees(
+      searchedSessions,
+      pinnedIds,
+      sessionOrg.assignments,
+      new Set(sessionOrg.folders.map((folder) => folder.id)),
+    );
+  }, [flatList, sessionTree, searchedSessions, pinnedIds, sessionOrg.assignments, sessionOrg.folders]);
+  const pinnedTree = groupedTrees.pinned;
+  const folderTrees = groupedTrees.folders;
+  const effectiveFolderBySessionId = groupedTrees.effectiveFolderBySessionId;
+  const ungroupedTree = groupedTrees.ungrouped;
 
-  // Flat row renderer for pinned/folder groups (no fork nesting inside those).
-  const renderSessionRow = (session: SessionInfo, depth: number) => (
-    <SessionItem
-      key={session.id}
-      session={session}
-      isSelected={session.id === selectedSessionId}
-      isRunning={runningSessionIds.has(session.id)}
-      isUnread={unreadSessionIds.has(session.id)}
-      onClick={() => handleSelectSessionFromList(session)}
+  const handleDeletedSessionOrganization = (id: string) => {
+    onSessionDeleted?.(id);
+    // Every rendering path (pinned, folder, ungrouped tree) uses this cleanup.
+    // Keeping it centralized prevents invisible stale assignments after a
+    // child/root session is deleted from a nested tree.
+    updateSessionOrg((org) => removeSessionOrganizationReferences(org, id, filteredSessions));
+    loadSessions();
+  };
+
+  const renderSessionTree = (node: SessionTreeNode, depth: number) => (
+    <SessionTreeItem
+      key={node.session.id}
+      node={node}
+      selectedSessionId={selectedSessionId}
+      runningSessionIds={runningSessionIds}
+      unreadSessionIds={unreadSessionIds}
+      onSelectSession={handleSelectSessionFromList}
       onRenamed={loadSessions}
-      onDeleted={(id) => {
-        onSessionDeleted?.(id);
-        // Also purge organization references so a deleted session does not
-        // linger in pinned/assignment metadata.
-        updateSessionOrg((org) => ({
-          ...org,
-          pinned: org.pinned.filter((p) => p !== id),
-          assignments: Object.fromEntries(
-            Object.entries(org.assignments).filter(([sid]) => sid !== id),
-          ),
-        }));
-        loadSessions();
-      }}
+      onSessionDeleted={handleDeletedSessionOrganization}
       depth={depth}
-      isPinned={pinnedIds.has(session.id)}
-      onTogglePinned={() => togglePinned(session.id)}
+      pinnedIds={pinnedIds}
+      onTogglePinned={togglePinned}
       folders={sessionOrg.folders}
-      currentFolderId={sessionOrg.assignments[session.id] ?? null}
-      onMoveToFolder={(folderId) => moveSessionToFolder(session.id, folderId)}
-      onCreateFolder={(name) => createFolder(name)}
+      assignments={sessionOrg.assignments}
+      effectiveFolderBySessionId={effectiveFolderBySessionId}
+      onMoveToFolder={moveSessionToFolder}
+      onCreateFolder={createFolder}
       bulkMode={bulkMode}
-      bulkChecked={bulkSelected.has(session.id)}
-      onBulkToggle={() => toggleBulkSelected(session.id)}
+      bulkSelected={bulkSelected}
+      onBulkToggle={toggleBulkSelected}
       folderMenuFor={folderMenuFor}
       onFolderMenuFor={setFolderMenuFor}
     />
@@ -2050,29 +2054,30 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         )}
 
         {/* Pinned group */}
-        {!loading && !error && pinnedSessions.length > 0 && (
+        {!loading && !error && pinnedTree.length > 0 && (
           <>
             <SidebarGroupLabel label={t("sidebar.pinned")} />
-            {pinnedSessions.map((s) => renderSessionRow(s, 0))}
+            {pinnedTree.map((node) => renderSessionTree(node, 0))}
           </>
         )}
 
         {/* Folder groups */}
         {!loading && !error && !flatList && sessionOrg.folders.map((folder) => {
-          const items = folderContents.get(folder.id) ?? [];
-          if (items.length === 0 && hasSearchQuery) return null;
+          const trees = folderTrees.get(folder.id) ?? [];
+          const itemCount = countSessionTreeNodes(trees);
+          if (itemCount === 0 && hasSearchQuery) return null;
           const collapsed = sessionOrg.collapsedFolders.includes(folder.id);
           return (
             <div key={folder.id}>
               <FolderRow
                 folder={folder}
-                count={items.length}
+                count={itemCount}
                 collapsed={collapsed}
                 onToggle={() => toggleFolderCollapsed(folder.id)}
                 onRename={(name) => renameFolder(folder.id, name)}
                 onDelete={() => deleteFolder(folder.id)}
               />
-              {!collapsed && items.map((s) => renderSessionRow(s, 1))}
+              {!collapsed && trees.map((node) => renderSessionTree(node, 1))}
             </div>
           );
         })}
@@ -2091,15 +2096,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   unreadSessionIds={unreadSessionIds}
                   onSelectSession={handleSelectSessionFromList}
                   onRenamed={loadSessions}
-                  onSessionDeleted={(id) => {
-                    onSessionDeleted?.(id);
-                    loadSessions();
-                  }}
+                  onSessionDeleted={handleDeletedSessionOrganization}
                   depth={0}
                   pinnedIds={pinnedIds}
                   onTogglePinned={togglePinned}
                   folders={sessionOrg.folders}
                   assignments={sessionOrg.assignments}
+                  effectiveFolderBySessionId={effectiveFolderBySessionId}
                   onMoveToFolder={moveSessionToFolder}
                   onCreateFolder={createFolder}
                   bulkMode={bulkMode}
@@ -2123,15 +2126,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 unreadSessionIds={unreadSessionIds}
                 onSelectSession={handleSelectSessionFromList}
                 onRenamed={loadSessions}
-                onSessionDeleted={(id) => {
-                  onSessionDeleted?.(id);
-                  loadSessions();
-                }}
+                onSessionDeleted={handleDeletedSessionOrganization}
                 depth={0}
                 pinnedIds={pinnedIds}
                 onTogglePinned={togglePinned}
                 folders={sessionOrg.folders}
                 assignments={sessionOrg.assignments}
+                effectiveFolderBySessionId={effectiveFolderBySessionId}
                 onMoveToFolder={moveSessionToFolder}
                 onCreateFolder={createFolder}
                 bulkMode={bulkMode}
@@ -2279,6 +2280,7 @@ function SessionTreeItem({
   onTogglePinned,
   folders,
   assignments,
+  effectiveFolderBySessionId,
   onMoveToFolder,
   onCreateFolder,
   bulkMode,
@@ -2299,8 +2301,9 @@ function SessionTreeItem({
   onTogglePinned: (id: string) => void;
   folders: SessionFolder[];
   assignments: Record<string, string>;
+  effectiveFolderBySessionId: ReadonlyMap<string, string | null>;
   onMoveToFolder: (sessionId: string, folderId: string | null) => void;
-  onCreateFolder: (name: string) => void;
+  onCreateFolder: (name: string) => string | null;
   bulkMode: boolean;
   bulkSelected: Set<string>;
   onBulkToggle: (id: string) => void;
@@ -2339,7 +2342,7 @@ function SessionTreeItem({
           isPinned={pinnedIds.has(node.session.id)}
           onTogglePinned={() => onTogglePinned(node.session.id)}
           folders={folders}
-          currentFolderId={assignments[node.session.id] ?? null}
+          currentFolderId={effectiveFolderBySessionId.get(node.session.id) ?? null}
           onMoveToFolder={(folderId) => onMoveToFolder(node.session.id, folderId)}
           onCreateFolder={onCreateFolder}
           bulkMode={bulkMode}
@@ -2366,6 +2369,7 @@ function SessionTreeItem({
               onTogglePinned={onTogglePinned}
               folders={folders}
               assignments={assignments}
+              effectiveFolderBySessionId={effectiveFolderBySessionId}
               onMoveToFolder={onMoveToFolder}
               onCreateFolder={onCreateFolder}
               bulkMode={bulkMode}
@@ -2524,6 +2528,13 @@ function FolderRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(folder.name);
+  const renameCommittedRef = useRef(false);
+  const finishRename = (commit: boolean) => {
+    if (renameCommittedRef.current) return;
+    renameCommittedRef.current = true;
+    if (commit && renameValue.trim()) onRename(renameValue);
+    setRenaming(false);
+  };
 
   if (renaming) {
     return (
@@ -2534,10 +2545,10 @@ function FolderRow({
           onChange={(e) => setRenameValue(e.target.value)}
           onFocus={(e) => e.currentTarget.select()}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && renameValue.trim()) { onRename(renameValue); setRenaming(false); }
-            if (e.key === "Escape") setRenaming(false);
+            if (e.key === "Enter" && renameValue.trim()) finishRename(true);
+            if (e.key === "Escape") finishRename(false);
           }}
-          onBlur={() => { if (renameValue.trim()) onRename(renameValue); setRenaming(false); }}
+          onBlur={() => finishRename(true)}
           style={{
             width: "100%", height: 28, padding: "0 8px", fontSize: 12,
             background: "var(--bg)", border: "1px solid var(--accent)",
@@ -2597,7 +2608,7 @@ function FolderRow({
       {hovered && (
         <div style={{ display: "flex", gap: 3, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
           <button
-            onClick={() => { setRenameValue(folder.name); setRenaming(true); }}
+            onClick={() => { renameCommittedRef.current = false; setRenameValue(folder.name); setRenaming(true); }}
             title={t("sidebar.renameFolder")}
             style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
           >
@@ -2661,7 +2672,7 @@ function SessionItem({
   folders?: SessionFolder[];
   currentFolderId?: string | null;
   onMoveToFolder?: (folderId: string | null) => void;
-  onCreateFolder?: (name: string) => void;
+  onCreateFolder?: (name: string) => string | null;
   bulkMode?: boolean;
   bulkChecked?: boolean;
   onBulkToggle?: () => void;
@@ -2744,12 +2755,12 @@ function SessionItem({
     // a skill-invoked session stays a no-op instead of persisting raw XML.)
     if (renameValue === title || name === (session.name ?? "")) return;
     try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
       });
-      onRenamed?.();
+      if (response.ok) onRenamed?.();
     } catch {
       // ignore
     }
@@ -2760,7 +2771,11 @@ function SessionItem({
     setConfirmDelete(false);
     setDeleting(true);
     try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      if (!response.ok) {
+        setDeleting(false);
+        return;
+      }
       onDeleted?.(session.id);
     } catch {
       setDeleting(false);
@@ -3128,7 +3143,8 @@ function SessionItem({
                         onChange={(e) => setFolderMenuNewName(e.target.value)}
                         onKeyDown={(e) => {
                           if (e.key === "Enter" && folderMenuNewName.trim()) {
-                            onCreateFolder?.(folderMenuNewName);
+                            const folderId = onCreateFolder?.(folderMenuNewName);
+                            if (folderId) onMoveToFolder?.(folderId);
                             setFolderMenuNewName("");
                             onFolderMenuFor?.(null);
                           }

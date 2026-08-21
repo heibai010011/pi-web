@@ -11,13 +11,12 @@
  * ~/.pi/agent/sessions and deleting a folder never touches session files.
  */
 
-import { EMPTY_SESSION_ORGANIZATION, normalizeSessionOrganization, type SessionOrganization } from "./session-org-shape";
+import { EMPTY_SESSION_ORGANIZATION, normalizeSessionOrganization, SESSION_ORG_UNGROUPED, type SessionOrganization } from "./session-org-shape";
 
-export { EMPTY_SESSION_ORGANIZATION, normalizeSessionOrganization };
+export { EMPTY_SESSION_ORGANIZATION, normalizeSessionOrganization, SESSION_ORG_UNGROUPED };
 export type { SessionFolder, SessionOrganization } from "./session-org-shape";
 
 export const SESSION_ORG_STORAGE_KEY = "pi-web:session-organization";
-export const SESSION_ORG_SYNCED_FLAG = "syncedToServer";
 
 /**
  * Storage is scoped per project key so folders/pins created under one
@@ -118,7 +117,9 @@ export function persistSessionOrganization(org: SessionOrganization, projectKey:
       pinned: org.pinned,
       folders: org.folders,
       assignments: Object.fromEntries(
-        Object.entries(org.assignments).filter(([, folderId]) => folderIds.has(folderId)),
+        Object.entries(org.assignments).filter(([, folderId]) => (
+          folderId === SESSION_ORG_UNGROUPED || folderIds.has(folderId)
+        )),
       ),
       collapsedFolders: org.collapsedFolders.filter((id) => folderIds.has(id)),
     };

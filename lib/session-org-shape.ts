@@ -4,6 +4,9 @@
  * server-side store (session-org-store.ts) — keep it dependency-free.
  */
 
+/** Explicitly keep a child session outside its parent's inherited folder. */
+export const SESSION_ORG_UNGROUPED = "__pi-web-ungrouped__";
+
 export interface SessionFolder {
   id: string;
   name: string;

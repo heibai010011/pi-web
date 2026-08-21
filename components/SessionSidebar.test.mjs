@@ -68,3 +68,28 @@ test("does not expose disk-backed actions for transient sessions", () => {
   assert.match(sessionItemSource, /if \(session\.transient\) return;/);
   assert.match(sessionItemSource, /\{\(hovered \|\| folderMenuOpen\) && !session\.transient && !bulkMode && \(/);
 });
+
+test("folder and pinned groups render parent-child trees instead of flat rows", () => {
+  assert.match(source, /const groupedTrees = useMemo\([\s\S]*?groupSessionTrees\(/);
+  assert.match(source, /pinnedTree\.map\(\(node\) => renderSessionTree\(node, 0\)\)/);
+  assert.match(source, /trees\.map\(\(node\) => renderSessionTree\(node, 1\)\)/);
+  assert.doesNotMatch(source, /no fork nesting inside those/);
+});
+
+test("creating a folder from a session menu moves that session into it", () => {
+  assert.match(
+    sessionItemSource,
+    /const folderId = onCreateFolder\?\.\(folderMenuNewName\);\s*if \(folderId\) onMoveToFolder\?\.\(folderId\);/,
+  );
+});
+
+test("failed rename and delete requests do not report successful mutations", () => {
+  assert.match(sessionItemSource, /if \(response\.ok\) onRenamed\?\.\(\);/);
+  assert.match(sessionItemSource, /if \(!response\.ok\) \{\s*setDeleting\(false\);\s*return;/);
+  assert.match(source, /if \(!response\.ok\) continue;/);
+});
+
+test("every session delete path purges or hands down organization metadata", () => {
+  assert.match(source, /const handleDeletedSessionOrganization[\s\S]*?removeSessionOrganizationReferences\(org, id, filteredSessions\)/);
+  assert.match(source, /onSessionDeleted=\{handleDeletedSessionOrganization\}/);
+});
