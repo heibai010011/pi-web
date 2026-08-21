@@ -15,6 +15,7 @@ import {
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
+import { runWithSubagentParentSession } from "./subagent-session-lineage";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type {
@@ -450,16 +451,18 @@ export class AgentSessionWrapper {
           notifyRunningChange();
           let prompt: Promise<void>;
           try {
-            prompt = this.inner.prompt(command.message as string, {
-              ...(promptImages?.length ? { images: promptImages } : {}),
-              ...(streamingBehavior ? { streamingBehavior } : {}),
-              source: "rpc",
-              // Match pi's RPC contract: acknowledge only after synchronous prompt
-              // validation and extension preflight have accepted the submission.
-              preflightResult: (success) => {
-                if (success) acceptPreflight();
-              },
-            });
+            prompt = runWithSubagentParentSession(this.inner.sessionFile, () => (
+              this.inner.prompt(command.message as string, {
+                ...(promptImages?.length ? { images: promptImages } : {}),
+                ...(streamingBehavior ? { streamingBehavior } : {}),
+                source: "rpc",
+                // Match pi's RPC contract: acknowledge only after synchronous prompt
+                // validation and extension preflight have accepted the submission.
+                preflightResult: (success) => {
+                  if (success) acceptPreflight();
+                },
+              })
+            ));
           } catch (error) {
             finishPrompt();
             throw error;
