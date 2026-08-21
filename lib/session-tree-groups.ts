@@ -135,11 +135,23 @@ export function removeSessionOrganizationReferences(
   sessions: SessionInfo[],
 ): SessionOrganization {
   const assignments = { ...org.assignments };
-  const inheritedFolder = assignments[deletedSessionId];
+  const directPlacement = assignments[deletedSessionId];
+  // Resolve folder inheritance without pin precedence: a pinned session can
+  // still carry a folder assignment that its children must retain after the
+  // pinned parent is deleted.
+  const effectiveFolder = groupSessionTrees(
+    sessions,
+    new Set(),
+    org.assignments,
+    new Set(org.folders.map((folder) => folder.id)),
+  ).effectiveFolderBySessionId.get(deletedSessionId) ?? null;
+  const inheritedFolder = directPlacement === SESSION_ORG_UNGROUPED
+    ? SESSION_ORG_UNGROUPED
+    : effectiveFolder;
   const wasPinned = org.pinned.includes(deletedSessionId);
   const directChildren = sessions.filter((session) => session.parentSessionId === deletedSessionId);
   for (const child of directChildren) {
-    if (assignments[child.id] === undefined && inheritedFolder !== undefined) {
+    if (assignments[child.id] === undefined && inheritedFolder !== null) {
       assignments[child.id] = inheritedFolder;
     }
   }

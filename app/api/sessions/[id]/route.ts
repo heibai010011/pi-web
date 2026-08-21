@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { existsSync, statSync, unlinkSync } from "fs";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   resolveSessionPath,
@@ -8,9 +7,10 @@ import {
   invalidateSessionPathCache,
   invalidateSessionListCache,
   buildSessionContext,
+  listAllSessions,
   readSessionHeader,
 } from "@/lib/session-reader";
-import { sessionPathKey } from "@/lib/session-path";
+import { reparentDirectChildSessions } from "@/lib/session-delete-lineage";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { projectTreeForResponse } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
@@ -117,36 +117,39 @@ export async function DELETE(
     // Read only the bounded header before deleting.
     const parentSessionPath = readSessionHeader(filePath)?.parentSession;
 
-    // Re-attach all direct children to this session's parent (cascade re-parent)
-    // Scan sibling files in the same directory
-    const targetPathKey = sessionPathKey(filePath);
-    const dir = dirname(filePath);
-    try {
-      const files = readdirSync(dir).filter(
-        (file) => file.endsWith(".jsonl") && sessionPathKey(join(dir, file)) !== targetPathKey,
-      );
-      for (const file of files) {
-        const childPath = join(dir, file);
-        try {
-          const content = readFileSync(childPath, "utf8");
-          const lines = content.split("\n");
-          const header = JSON.parse(lines[0]) as { type?: string; parentSession?: string };
-          if (
-            header.type === "session" &&
-            header.parentSession &&
-            sessionPathKey(header.parentSession) === targetPathKey
-          ) {
-            // Rewrite header with new parentSession
-            header.parentSession = parentSessionPath;
-            lines[0] = JSON.stringify(header);
-            writeFileSync(childPath, lines.join("\n"));
-          }
-        } catch { /* skip malformed */ }
-      }
-    } catch { /* skip if dir unreadable */ }
-
+    // Stop the live parent before mutating any child file. If shutdown fails,
+    // the tree remains untouched instead of being left half-reparented.
     await getRpcSession(id)?.shutdown();
-    unlinkSync(filePath);
+
+    // Re-attach direct children globally, not only sibling files. Subagents
+    // and worktree/custom-cwd sessions often live in a different encoded-cwd
+    // directory while still pointing at this parent session.
+    const sessions = await listAllSessions({ force: true });
+    const reparented = reparentDirectChildSessions(
+      sessions,
+      id,
+      filePath,
+      parentSessionPath,
+    );
+    if (reparented.failedIds.length > 0) {
+      // Never delete the parent if doing so would strand a known child with a
+      // dangling parentSession path. The user can retry after the I/O issue is
+      // resolved instead of silently corrupting the tree.
+      return NextResponse.json({
+        error: "Failed to reparent child sessions",
+        childSessionIds: reparented.failedIds,
+      }, { status: 500 });
+    }
+
+    try {
+      unlinkSync(filePath);
+    } catch (error) {
+      const rollbackFailedIds = reparented.rollback();
+      return NextResponse.json({
+        error: String(error),
+        ...(rollbackFailedIds.length > 0 ? { rollbackFailedChildSessionIds: rollbackFailedIds } : {}),
+      }, { status: 500 });
+    }
     invalidateSessionPathCache(id);
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });
