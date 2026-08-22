@@ -10,6 +10,7 @@ import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { countSessionTreeNodes, groupSessionTrees, removeSessionOrganizationReferences } from "@/lib/session-tree-groups";
 import { registerSessionFolderDraft, SESSION_ORGANIZATION_CHANGED_EVENT } from "@/lib/session-folder-drafts";
+import { buildCurrentWorkSections, splitOlderSessionTrees, type SessionSidebarTimeSection } from "@/lib/session-sidebar-sections";
 import {
   beginSessionOrganizationSync,
   createFolderId,
@@ -477,6 +478,27 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [bulkSelected, setBulkSelected] = useState<Set<string>>(() => new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [folderMenuFor, setFolderMenuFor] = useState<string | null>(null);
+  const [sessionView, setSessionViewState] = useState<"current" | "all">("current");
+  useLayoutEffect(() => {
+    try {
+      if (window.localStorage.getItem("pi-web:session-sidebar-view") === "all") {
+        setSessionViewState("all");
+      }
+    } catch { /* best effort */ }
+  }, []);
+  const [expandedOlderGroups, setExpandedOlderGroups] = useState<Set<string>>(() => new Set());
+  const toggleOlderGroup = useCallback((groupId: string) => {
+    setExpandedOlderGroups((previous) => {
+      const next = new Set(previous);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
+  }, []);
+  const setSessionView = useCallback((view: "current" | "all") => {
+    setSessionViewState(view);
+    try { window.localStorage.setItem("pi-web:session-sidebar-view", view); } catch { /* best effort */ }
+  }, []);
 
   // (Organization effect + handlers live after `selectedProject` is defined —
   // they are scoped per workspace and need its key.)
@@ -1310,6 +1332,30 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const folderTrees = groupedTrees.folders;
   const effectiveFolderBySessionId = groupedTrees.effectiveFolderBySessionId;
   const ungroupedTree = groupedTrees.ungrouped;
+  const focusedImportantIds = useMemo(() => new Set([
+    ...runningSessionIds,
+    ...unreadSessionIds,
+    ...pinnedIds,
+    ...(selectedSessionId ? [selectedSessionId] : []),
+  ]), [runningSessionIds, unreadSessionIds, pinnedIds, selectedSessionId]);
+  const currentWorkRoots = useMemo(() => [
+    ...pinnedTree,
+    ...sessionOrg.folders.flatMap((folder) => folderTrees.get(folder.id) ?? []),
+    ...ungroupedTree,
+  ], [pinnedTree, sessionOrg.folders, folderTrees, ungroupedTree]);
+  const currentWorkSections = useMemo(
+    () => buildCurrentWorkSections(currentWorkRoots, focusedImportantIds),
+    [currentWorkRoots, focusedImportantIds],
+  );
+  const olderSplit = useCallback(
+    (trees: SessionTreeNode[]) => splitOlderSessionTrees(trees),
+    [],
+  );
+  const effectiveSessionView = hasSearchQuery || bulkMode ? "all" : sessionView;
+  const ungroupedAgeSplit = useMemo(
+    () => flatList ? { recent: ungroupedTree, older: [] } : splitOlderSessionTrees(ungroupedTree),
+    [flatList, ungroupedTree],
+  );
 
   const handleDeletedSessionOrganization = (id: string) => {
     hideDeletedSession(id);
@@ -1319,6 +1365,28 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     // child/root session is deleted from a nested tree.
     updateSessionOrg((org) => removeSessionOrganizationReferences(org, id, filteredSessions));
     loadSessions();
+  };
+
+  const renderOlderTrees = (groupId: string, trees: SessionTreeNode[], depth: number) => {
+    if (trees.length === 0) return null;
+    const expanded = expandedOlderGroups.has(groupId);
+    return (
+      <div>
+        <button
+          onClick={() => toggleOlderGroup(groupId)}
+          aria-expanded={expanded}
+          style={{
+            width: "100%", height: 28, padding: `0 12px 0 ${12 + depth * 14}px`,
+            display: "flex", alignItems: "center", gap: 6, border: "none",
+            background: "transparent", color: "var(--text-dim)", cursor: "pointer", fontSize: 11,
+          }}
+        >
+          <span style={{ transform: expanded ? "none" : "rotate(-90deg)", transition: "transform 0.15s" }}>⌄</span>
+          {t("sidebar.olderSessions", { count: countSessionTreeNodes(trees) })}
+        </button>
+        {expanded && trees.map((node) => renderSessionTree(node, depth))}
+      </div>
+    );
   };
 
   const renderSessionTree = (node: SessionTreeNode, depth: number) => (
@@ -2010,6 +2078,30 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         )}
       </div>
 
+      {/* Focused time view vs complete folder view. Search/bulk temporarily
+          show all matching sessions without overwriting the saved preference. */}
+      <div style={{ display: "flex", gap: 3, margin: "6px 10px 0", padding: 2, borderRadius: 7, background: "var(--bg-hover)", flexShrink: 0 }}>
+        {(["current", "all"] as const).map((view) => {
+          const active = sessionView === view;
+          return (
+            <button
+              key={view}
+              onClick={() => setSessionView(view)}
+              aria-pressed={active}
+              style={{
+                flex: 1, height: 25, padding: "0 8px", border: "none", borderRadius: 5,
+                background: active ? "var(--bg-panel)" : "transparent",
+                color: active ? "var(--text)" : "var(--text-dim)",
+                boxShadow: active ? "0 1px 2px rgba(0,0,0,0.12)" : "none",
+                fontSize: 11, fontWeight: active ? 600 : 500, cursor: "pointer",
+              }}
+            >
+              {view === "current" ? t("sidebar.currentWork") : t("sidebar.allSessions")}
+            </button>
+          );
+        })}
+      </div>
+
       {/* Session search + bulk toolbar */}
       <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 10px 4px", flexShrink: 0 }}>
         <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
@@ -2108,8 +2200,37 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           </div>
         )}
 
+        {/* Focused view: complete trees grouped once by importance/time. */}
+        {!loading && !error && effectiveSessionView === "current" && currentWorkSections.map((section) => {
+          const labels: Record<SessionSidebarTimeSection, string> = {
+            active: t("sidebar.activeSessions"),
+            today: t("sidebar.today"),
+            yesterday: t("sidebar.yesterday"),
+            week: t("sidebar.last7Days"),
+            month: t("sidebar.last30Days"),
+          };
+          return (
+            <div key={section.id}>
+              <SidebarGroupLabel label={labels[section.id]} />
+              {section.trees.map((node) => renderSessionTree(node, 0))}
+            </div>
+          );
+        })}
+
+        {!loading && !error && effectiveSessionView === "current" && currentWorkSections.length === 0 && searchedSessions.length > 0 && (
+          <div style={{ padding: "18px 14px", textAlign: "center", color: "var(--text-dim)", fontSize: 11 }}>
+            <div>{t("sidebar.noCurrentWork")}</div>
+            <button
+              onClick={() => setSessionView("all")}
+              style={{ marginTop: 8, height: 26, padding: "0 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}
+            >
+              {t("sidebar.viewAllSessions")}
+            </button>
+          </div>
+        )}
+
         {/* Pinned group */}
-        {!loading && !error && pinnedTree.length > 0 && (
+        {!loading && !error && effectiveSessionView === "all" && pinnedTree.length > 0 && (
           <>
             <SidebarGroupLabel label={t("sidebar.pinned")} />
             {pinnedTree.map((node) => renderSessionTree(node, 0))}
@@ -2117,8 +2238,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         )}
 
         {/* Folder groups */}
-        {!loading && !error && !flatList && sessionOrg.folders.map((folder) => {
+        {!loading && !error && effectiveSessionView === "all" && !flatList && sessionOrg.folders.map((folder) => {
           const trees = folderTrees.get(folder.id) ?? [];
+          const { recent, older } = flatList ? { recent: trees, older: [] } : olderSplit(trees);
           const itemCount = countSessionTreeNodes(trees);
           if (itemCount === 0 && hasSearchQuery) return null;
           const collapsed = sessionOrg.collapsedFolders.includes(folder.id);
@@ -2133,17 +2255,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 onDelete={() => deleteFolder(folder.id)}
                 onNewSession={() => handleNewSessionInFolder(folder.id)}
               />
-              {!collapsed && trees.map((node) => renderSessionTree(node, 1))}
+              {!collapsed && recent.map((node) => renderSessionTree(node, 1))}
+              {!collapsed && renderOlderTrees(`folder:${folder.id}`, older, 1)}
             </div>
           );
         })}
 
         {/* Ungrouped sessions */}
-        {!loading && !error && (ungroupedTree.length > 0 || (flatList && sessionTree.length > 0)) && (
+        {!loading && !error && effectiveSessionView === "all" && (ungroupedTree.length > 0 || (flatList && sessionTree.length > 0)) && (
           sessionOrg.folders.length > 0 && !flatList ? (
             <>
               <SidebarGroupLabel label={t("sidebar.ungrouped")} />
-              {ungroupedTree.map((node) => (
+              {ungroupedAgeSplit.recent.map((node) => (
                 <SessionTreeItem
                   key={node.session.id}
                   node={node}
@@ -2168,12 +2291,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   onFolderMenuFor={setFolderMenuFor}
                 />
               ))}
+              {renderOlderTrees("ungrouped", ungroupedAgeSplit.older, 0)}
             </>
           ) : (
             // No folders exist: render the ungrouped tree, which already
             // excludes pinned sessions (rendered in the pinned group above)
             // and folder-assigned sessions.
-            ungroupedTree.map((node) => (
+            <>
+              {ungroupedAgeSplit.recent.map((node) => (
               <SessionTreeItem
                 key={node.session.id}
                 node={node}
@@ -2197,7 +2322,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 folderMenuFor={folderMenuFor}
                 onFolderMenuFor={setFolderMenuFor}
               />
-            ))
+              ))}
+              {renderOlderTrees("ungrouped", ungroupedAgeSplit.older, 0)}
+            </>
           )
         )}
       </div>

@@ -72,7 +72,8 @@ test("does not expose disk-backed actions for transient sessions", () => {
 test("folder and pinned groups render parent-child trees instead of flat rows", () => {
   assert.match(source, /const groupedTrees = useMemo\([\s\S]*?groupSessionTrees\(/);
   assert.match(source, /pinnedTree\.map\(\(node\) => renderSessionTree\(node, 0\)\)/);
-  assert.match(source, /trees\.map\(\(node\) => renderSessionTree\(node, 1\)\)/);
+  assert.match(source, /recent\.map\(\(node\) => renderSessionTree\(node, 1\)\)/);
+  assert.match(source, /renderOlderTrees\(`folder:\$\{folder\.id\}`, older, 1\)/);
   assert.doesNotMatch(source, /no fork nesting inside those/);
 });
 
@@ -102,6 +103,21 @@ test("successful deletion hides the row before cleaning folder organization", ()
 test("deleted-session tombstones filter stale session-list responses", () => {
   assert.match(source, /data\.sessions\.filter\(\(session\) => !deletedSessionTombstonesRef\.current\.has\(session\.id\)\)/);
   assert.doesNotMatch(source, /deletedSessionTombstonesRef\.current\.delete/);
+});
+
+test("sidebar offers remembered Current work and All sessions views", () => {
+  assert.match(source, /pi-web:session-sidebar-view/);
+  assert.match(source, /t\("sidebar\.currentWork"\)/);
+  assert.match(source, /t\("sidebar\.allSessions"\)/);
+  assert.match(source, /const effectiveSessionView = hasSearchQuery \|\| bulkMode \? "all" : sessionView/);
+});
+
+test("current work groups complete trees while all view folds older roots per group", () => {
+  assert.match(source, /const currentWorkRoots = useMemo\(\(\) => \[[\s\S]*?\.\.\.pinnedTree,[\s\S]*?folderTrees\.get\(folder\.id\)[\s\S]*?\.\.\.ungroupedTree/);
+  assert.match(source, /buildCurrentWorkSections\(currentWorkRoots, focusedImportantIds\)/);
+  assert.match(source, /renderOlderTrees\(`folder:\$\{folder\.id\}`, older, 1\)/);
+  assert.match(source, /renderOlderTrees\("ungrouped", ungroupedAgeSplit\.older, 0\)/);
+  assert.match(source, /flatList \? \{ recent: ungroupedTree, older: \[\] \}/);
 });
 
 test("folder rows can create a draft session directly in that folder", () => {
