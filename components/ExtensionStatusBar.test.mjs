@@ -76,6 +76,16 @@ test("renders a single status line without identifier keys", () => {
   assert.doesNotMatch(html, /05-ponytail|20-memory/);
 });
 
+test("OSC 8 file:// links render as clickable anchors", () => {
+  const link = "\x1b]8;;file:///C:/repo/x.yaml\x1b\\x.yaml\x1b]8;;\x1b\\";
+  const html = renderStatusBar({
+    statuses: [{ key: "status", text: link }],
+  });
+
+  assert.match(html, /<a href="file:\/\/\/C:\/repo\/x.yaml"/);
+  assert.match(html, />x\.yaml</);
+});
+
 test("renders widgets and status text in one footer", () => {
   const html = renderStatusBar({
     statuses: [{ key: "status", text: "connected" }],

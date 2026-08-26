@@ -4,6 +4,7 @@ import { type MouseEvent } from "react";
 import { parseAnsiLine, stripAnsi } from "@/lib/ansi";
 import { resolveLocalFileHref } from "@/lib/file-links";
 import type { ExtensionStatusItem, ExtensionWidgetItem } from "@/lib/types";
+import { AnsiText } from "./AnsiText";
 import { ExtensionWidgets } from "./ExtensionWidgets";
 
 export function sanitizeExtensionStatusText(text: string): string {
@@ -20,6 +21,11 @@ export function formatExtensionStatusLine(statuses: ExtensionStatusItem[]): stri
     .sort((a, b) => a.key.localeCompare(b.key))
     .map(({ text }) => sanitizeExtensionStatusText(text))
     .join(" ");
+}
+
+/** True when the line carries OSC 8 file:// links this fork makes clickable. */
+function hasLocalFileLinks(statusLine: string): boolean {
+  return statusLine.includes("\x1b]8;;file://");
 }
 
 export function ExtensionStatusBar({
@@ -80,7 +86,12 @@ export function ExtensionStatusBar({
           title={plainStatusLine}
         >
           <span className="extension-status-text">
-            {parseAnsiLine(statusLine).map(renderSegmentLink)}
+            {/* ansi_up covers the full SGR set faithfully; local file://
+                hyperlinks fall back to parseAnsiLine so clicking opens the
+                file tab instead of a raw browser navigation. */}
+            {hasLocalFileLinks(statusLine)
+              ? parseAnsiLine(statusLine).map(renderSegmentLink)
+              : <AnsiText text={statusLine} />}
           </span>
         </div>
       )}

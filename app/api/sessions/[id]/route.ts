@@ -17,7 +17,7 @@ import { projectTreeForResponse } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { computeSessionStats } from "@/lib/session-stats";
 import type { SessionEntry } from "@/lib/types";
-import { readSubagentRun, readSubagentSessionResources, SUBAGENT_META_TYPE } from "@/lib/subagents";
+import { readSubagentRun, readSubagentSessionResources } from "@/lib/subagents";
 import { readSessionToolSelection } from "@/lib/session-tool-selection";
 
 export async function GET(
@@ -145,7 +145,13 @@ export async function DELETE(
     }
 
     // Read only the bounded header before deleting.
-    const parentSessionPath = readSessionHeader(filePath)?.parentSession;
+    const parentHeader = readSessionHeader(filePath);
+    const parentSessionPath = parentHeader?.parentSession;
+    // The grandparent's id is needed to also fix pi-web:subagent metadata
+    // entries, which record parentSessionId separately from the header.
+    const parentSessionId = parentSessionPath
+      ? readSessionHeader(parentSessionPath)?.id
+      : undefined;
 
     // Stop the live parent before mutating any child file. If shutdown fails,
     // the tree remains untouched instead of being left half-reparented.
@@ -160,6 +166,7 @@ export async function DELETE(
       id,
       filePath,
       parentSessionPath,
+      parentSessionId,
     );
     if (reparented.failedIds.length > 0) {
       // Never delete the parent if doing so would strand a known child with a

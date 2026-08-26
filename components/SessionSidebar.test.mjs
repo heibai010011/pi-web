@@ -169,16 +169,17 @@ test("new sessions register rule-based auto-classification before composer switc
 });
 
 test("hides subagent rows and aggregates their state into the main session row", () => {
-  // Upstream hides subagent rows inside their root's row. This fork nests
-  // them below their parent in the folder tree instead — both satisfy the
-  // invariant that a subagent never renders as an independent top-level row
-  // and that its running/selected state surfaces through the main row.
-  // Aggregation happens in SessionItem via familySessions.some(...) checks.
+  // Upstream hides subagent rows inside their root's row; this fork keeps the
+  // same invariant: a subagent never renders as an independent sidebar row,
+  // and its running/selected state surfaces through the main session row.
   assert.match(source, /listSessionFamilies\(filteredSessions\)/);
   assert.doesNotMatch(source, /\{sessionFamilies\.map\(/);
-  // Subagent rows stay nested: they render through SessionTreeItem recursion,
-  // never as standalone sidebar entries.
-  assert.match(source, /function SessionTreeItem\(/);
+  // Tree building and grouping both exclude subagents before rendering, so a
+  // subagent can neither become a root row nor a nested child row.
+  assert.match(source, /const visible = sessions\.filter\(\(s\) => s\.relation\?\.kind !== "subagent"\)/);
+  assert.match(source, /const rowSessions = useMemo\(\s*\(\) => searchedSessions\.filter\(\(s\) => s\.relation\?\.kind !== "subagent"\)/);
   // Unread/running aggregation excludes subagents from independent markers.
   assert.match(source, /session\.relation\?\.kind !== "subagent"/);
+  // A subagent-only search hit surfaces its MAIN session row in flat mode.
+  assert.match(source, /familySessions\.some\(\(s\) => searchedSessions\.some\(\(x\) => x\.id === s\.id\)\)/);
 });

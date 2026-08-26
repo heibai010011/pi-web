@@ -290,14 +290,18 @@ interface SessionTreeNode {
 }
 
 function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
+  // Subagent sessions never render as sidebar rows (upstream semantics):
+  // their state aggregates into the main session row instead. Filter them
+  // before tree building so they cannot appear as children either.
+  const visible = sessions.filter((s) => s.relation?.kind !== "subagent");
   const byId = new Map<string, SessionTreeNode>();
-  for (const s of sessions) {
+  for (const s of visible) {
     byId.set(s.id, { session: s, children: [] });
   }
 
   // Build a map of parentSessionId chains so we can resolve missing ancestors
   const parentOf = new Map<string, string>();
-  for (const s of sessions) {
+  for (const s of visible) {
     if (s.parentSessionId) parentOf.set(s.id, s.parentSessionId);
   }
 
@@ -1434,6 +1438,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // tree instead of filtering individual rows first: an unassigned subagent
   // inherits its parent's folder/pinned group and stays nested beneath it.
   const flatList = hasSearchQuery || bulkMode;
+  // Subagent rows never render (their state aggregates into the main row), so
+  // exclude them from every tree/group input before grouping.
+  const rowSessions = useMemo(
+    () => searchedSessions.filter((s) => s.relation?.kind !== "subagent"),
+    [searchedSessions],
+  );
   // In flat mode a subagent hit must surface its MAIN session row, not a
   // hidden subagent row (upstream families semantics).
   const flatSources = flatList
@@ -1448,14 +1458,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     : [];
   const sessionTree = flatList
     ? flatSources.map((s) => ({ session: s, children: [] as SessionTreeNode[] }))
-    : buildSessionTree(searchedSessions);
+    : buildSessionTree(rowSessions);
   // Rows always read the REAL pin state — flattening search results must not
   // fake them into looking unpinned (the pin action would then unpin).
   const pinnedIds = useMemo(
     () => new Set(flatList
       ? sessionOrg.pinned
-      : sessionOrg.pinned.filter((id) => searchedSessions.some((s) => s.id === id))),
-    [flatList, sessionOrg.pinned, searchedSessions],
+      : sessionOrg.pinned.filter((id) => rowSessions.some((s) => s.id === id))),
+    [flatList, sessionOrg.pinned, rowSessions],
   );
   const groupedTrees = useMemo(() => {
     if (flatList) {
@@ -1463,7 +1473,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       // state: an empty map would make pinned/foldered rows look ungrouped
       // and invert their organization actions (pin → unpin).
       const real = groupSessionTrees(
-        searchedSessions,
+        rowSessions,
         new Set(sessionOrg.pinned),
         sessionOrg.assignments,
         new Set(sessionOrg.folders.map((folder) => folder.id)),
@@ -1476,12 +1486,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       };
     }
     return groupSessionTrees(
-      searchedSessions,
+      rowSessions,
       pinnedIds,
       sessionOrg.assignments,
       new Set(sessionOrg.folders.map((folder) => folder.id)),
     );
-  }, [flatList, sessionTree, searchedSessions, pinnedIds, sessionOrg.pinned, sessionOrg.assignments, sessionOrg.folders]);
+  }, [flatList, sessionTree, rowSessions, pinnedIds, sessionOrg.pinned, sessionOrg.assignments, sessionOrg.folders]);
   const pinnedTree = groupedTrees.pinned;
   const folderTrees = groupedTrees.folders;
   const effectiveFolderBySessionId = groupedTrees.effectiveFolderBySessionId;
@@ -3493,8 +3503,16 @@ function SessionItem({
               <path d="M5 17h14l-1.5-5.5a7 7 0 1 0-11 0L5 17z" />
             </svg>
           )}
-          {/* Fork indicator for child sessions */}
-          {depth > 0 && !bulkMode && (
+          {/* Child-session glyph: robot for subagent relations, fork for
+              forked sessions. Subagent rows are normally hidden behind their
+              main row, but any surfaced descendant keeps its relation glyph. */}
+          {depth > 0 && !bulkMode && session.relation?.kind === "subagent" && (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <rect x="5" y="7" width="14" height="11" rx="2" />
+              <path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" />
+            </svg>
+          )}
+          {depth > 0 && !bulkMode && session.relation?.kind !== "subagent" && (
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
               <line x1="6" y1="3" x2="6" y2="15" />
               <circle cx="18" cy="6" r="3" />
