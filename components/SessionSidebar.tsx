@@ -3,6 +3,7 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { SessionInfo } from "@/lib/types";
+import { listSessionFamilies } from "@/lib/session-family";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
@@ -29,6 +30,7 @@ import {
   type SessionFolder,
   type SessionOrganization,
 } from "@/lib/session-folders";
+import { formatRelativeTime } from "@/lib/i18n/format";
 import { useI18n } from "@/hooks/useI18n";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
@@ -124,6 +126,7 @@ interface Props {
    *  Lets the app play a cross-workspace completion tone. */
   onBackgroundTaskDone?: () => void;
   onRunningSessionIdsChange?: (ids: Set<string>) => void;
+  onSessionsChange?: (sessions: SessionInfo[]) => void;
 }
 
 interface WorktreeEntry {
@@ -159,7 +162,26 @@ interface ValidatedProject {
 }
 
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
+const LAST_CUSTOM_CWD_STORAGE_KEY = "pi-web:last-custom-cwd";
 const RUNNING_SESSIONS_POLL_MS = 2500;
+
+function loadLastCustomCwd(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(LAST_CUSTOM_CWD_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveLastCustomCwd(cwd: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(LAST_CUSTOM_CWD_STORAGE_KEY, cwd);
+  } catch {
+    // Persistence is best-effort.
+  }
+}
 
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -182,20 +204,6 @@ function saveUnreadSessionIds(ids: Set<string>): void {
   } catch {
     // ignore storage quota / privacy-mode errors
   }
-}
-
-function formatRelativeTime(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diff = now.getTime() - date.getTime();
-  const mins = Math.floor(diff / 60000);
-  const hours = Math.floor(diff / 3600000);
-  const days = Math.floor(diff / 86400000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  if (hours < 24) return `${hours}h ago`;
-  if (days < 7) return `${days}d ago`;
-  return date.toLocaleDateString();
 }
 
 /** Substitute the home dir prefix with ~ (no path truncation — see PathLabel) */
@@ -274,7 +282,6 @@ function AnimatedDropdown({ open, children, style }: { open: boolean; children: 
     </div>
   );
 }
-
 
 
 interface SessionTreeNode {
@@ -414,7 +421,7 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   // Successful DELETEs disappear optimistically. Keep ids tombstoned across
@@ -428,7 +435,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [projectFilter, setProjectFilter] = useState("");
   const [wtFilter, setWtFilter] = useState("");
   const [customPathOpen, setCustomPathOpen] = useState(false);
-  const [customPathValue, setCustomPathValue] = useState("");
+  const [customPathValue, setCustomPathValue] = useState(loadLastCustomCwd);
   const [customPathError, setCustomPathError] = useState<string | null>(null);
   const [customPathValidating, setCustomPathValidating] = useState(false);
   const [validatedProject, setValidatedProject] = useState<ValidatedProject | null>(null);
@@ -447,6 +454,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [explorerKey, setExplorerKey] = useState(0);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
+  const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [changesCount, setChangesCount] = useState(0);
   const [changesCollapsed, setChangesCollapsed] = useState(true);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
@@ -454,6 +462,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
+  const currentSuppressedCompletionSessionIdsRef = useRef<Set<string>>(new Set());
+  const previousSuppressedCompletionSessionIdsRef = useRef<Set<string>>(new Set());
   // Once polling has delivered a snapshot it is the source of truth for
   // running state; late /api/sessions responses must not overwrite it.
   const runningPollAuthoritativeRef = useRef(false);
@@ -529,7 +539,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         cache: "no-store",
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[] };
+      const data = await res.json() as {
+        sessions: SessionInfo[];
+        runningSessionIds?: string[];
+        completionNotificationSuppressedSessionIds?: string[];
+      };
       // Session ids are immutable and never reused, so tombstones live for the
       // sidebar lifetime. Releasing one after a confirming response would let
       // an older request that resolves later resurrect the deleted row.
@@ -540,13 +554,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       // Treat the fetched running set as an initial fallback only. Once the
       // lightweight poll is live, a slow session-list fetch cannot overwrite it.
       if (!runningPollAuthoritativeRef.current) {
+        currentSuppressedCompletionSessionIdsRef.current = new Set(
+          data.completionNotificationSuppressedSessionIds ?? [],
+        );
         setRunningSessionIds(new Set(data.runningSessionIds ?? []));
       }
-      // Drop unread markers for sessions that no longer exist (e.g. deleted).
-      const existingIds = new Set(visibleSessions.map((s) => s.id));
+      // Drop unread markers for sessions that no longer exist (e.g. deleted)
+      // and for subagents, whose completion is intentionally silent even if an
+      // older client marked them unread.
+      const unreadEligibleIds = new Set(
+        visibleSessions
+          .filter((session) => session.relation?.kind !== "subagent")
+          .map((session) => session.id),
+      );
       setUnreadSessionIds((prev) => {
         if (prev.size === 0) return prev;
-        const next = new Set([...prev].filter((id) => existingIds.has(id)));
+        const next = new Set([...prev].filter((id) => unreadEligibleIds.has(id)));
         return next.size === prev.size ? prev : next;
       });
       setError(null);
@@ -608,9 +631,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           signal: current.signal,
         });
         if (!res.ok) return;
-        const data = await res.json() as { runningSessionIds?: string[] };
+        const data = await res.json() as {
+          runningSessionIds?: string[];
+          completionNotificationSuppressedSessionIds?: string[];
+        };
         if (stopped || controller !== current) return;
         runningPollAuthoritativeRef.current = true;
+        currentSuppressedCompletionSessionIdsRef.current = new Set(
+          data.completionNotificationSuppressedSessionIds ?? [],
+        );
         setRunningSessionIds(new Set(data.runningSessionIds ?? []));
       } catch {
         // Keep the last known state; the next visible-tab poll retries.
@@ -645,15 +674,27 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [onRunningSessionIdsChange, runningSessionIds]);
 
   useEffect(() => {
+    onSessionsChange?.(allSessions);
+  }, [allSessions, onSessionsChange]);
+
+  useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
     const completedInBackground = [...previous].filter((id) => !runningSessionIds.has(id) && id !== selectedSessionId);
+    const knownSubagentIds = new Set(
+      allSessions
+        .filter((session) => session.relation?.kind === "subagent")
+        .map((session) => session.id),
+    );
+    const completedWithNotifications = completedInBackground.filter(
+      (id) => !previousSuppressedCompletionSessionIdsRef.current.has(id) && !knownSubagentIds.has(id),
+    );
     const newlyRunning = [...runningSessionIds].filter((id) => !previous.has(id));
 
-    if (completedInBackground.length > 0 || newlyRunning.length > 0) {
+    if (completedWithNotifications.length > 0 || newlyRunning.length > 0) {
       setUnreadSessionIds((prev) => {
         const next = new Set(prev);
         runningSessionIds.forEach((id) => next.delete(id));
-        completedInBackground.forEach((id) => next.add(id));
+        completedWithNotifications.forEach((id) => next.add(id));
         return next;
       });
     }
@@ -663,11 +704,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (completedInBackground.length > 0 || hasUnlistedRunningSession) {
       loadSessions(false, true);
     }
-    if (completedInBackground.length > 0) {
+    if (completedWithNotifications.length > 0) {
       onBackgroundTaskDone?.();
     }
 
     previousRunningSessionIdsRef.current = runningSessionIds;
+    previousSuppressedCompletionSessionIdsRef.current = new Set(
+      [...runningSessionIds].filter(
+        (id) => currentSuppressedCompletionSessionIdsRef.current.has(id) || knownSubagentIds.has(id),
+      ),
+    );
   }, [runningSessionIds, selectedSessionId, allSessions, loadSessions, onBackgroundTaskDone]);
 
   useEffect(() => {
@@ -848,9 +894,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         root: data.projectRoot,
         key: data.projectKey,
       });
+      saveLastCustomCwd(data.cwd);
+      setCustomPathValue(data.cwd);
       setSelectedCwd(data.cwd);
       setCustomPathOpen(false);
-      setCustomPathValue("");
       setDropdownOpen(false);
     } catch (e) {
       setCustomPathError(e instanceof Error ? e.message : String(e));
@@ -871,7 +918,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       if (data.cwd) {
         setSelectedCwd(data.cwd);
         setCustomPathOpen(false);
-        setCustomPathValue("");
         setCustomPathError(null);
         setDropdownOpen(false);
       }
@@ -1377,13 +1423,31 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         }
       : null);
 
+  // Subagent sessions never render as their own sidebar rows; their state
+  // aggregates into the main session row (tree rows do this in
+  // SessionTreeItem). This family map also backs the search filter below so
+  // subagent-only matches surface their main session instead.
+  const sessionFamilies = useMemo(() => listSessionFamilies(filteredSessions), [filteredSessions]);
+
   // While searching or bulk-selecting, folders/pins are intentionally ignored
   // and results are flat. In browsing mode, group the COMPLETE parent/child
   // tree instead of filtering individual rows first: an unassigned subagent
   // inherits its parent's folder/pinned group and stays nested beneath it.
   const flatList = hasSearchQuery || bulkMode;
+  // In flat mode a subagent hit must surface its MAIN session row, not a
+  // hidden subagent row (upstream families semantics).
+  const flatSources = flatList
+    ? sessionFamilies.map((family) => {
+        const familySessions = [family.root, ...family.subagents];
+        const hit = familySessions.some((s) => searchedSessions.some((x) => x.id === s.id));
+        if (!hit) return null;
+        return family.latestModified === family.root.modified
+          ? family.root
+          : { ...family.root, modified: family.latestModified };
+      }).filter((s): s is SessionInfo => s !== null)
+    : [];
   const sessionTree = flatList
-    ? searchedSessions.map((s) => ({ session: s, children: [] as SessionTreeNode[] }))
+    ? flatSources.map((s) => ({ session: s, children: [] as SessionTreeNode[] }))
     : buildSessionTree(searchedSessions);
   // Rows always read the REAL pin state — flattening search results must not
   // fake them into looking unpinned (the pin action would then unpin).
@@ -1509,6 +1573,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {customPathOpen && (
         <DirectoryPicker
+          initialPath={customPathValue}
           busy={customPathValidating}
           error={customPathError}
           onCancel={() => {
@@ -1721,7 +1786,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                       setSelectedCwd(project.root);
                       setProjectFilter("");
                       setCustomPathOpen(false);
-                      setCustomPathValue("");
                       setCustomPathError(null);
                       setDropdownOpen(false);
                     }}
@@ -2501,6 +2565,21 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             )}
             {explorerOpen && (
               <ToolbarIconButton
+                onClick={() => {
+                  setFileSearchOpen((open) => !open);
+                }}
+                title={t("sidebar.searchFiles")}
+                ariaPressed={fileSearchOpen}
+                color={fileSearchOpen ? "var(--accent)" : "var(--text-dim)"}
+                background={fileSearchOpen ? "var(--bg-selected)" : "none"}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
+                </svg>
+              </ToolbarIconButton>
+            )}
+            {explorerOpen && (
+              <ToolbarIconButton
                 onClick={() => fileExplorerRef.current?.openUploadPicker()}
                 disabled={explorerUploadBusy}
                 title={t("sidebar.uploadFilesTitle")}
@@ -2551,6 +2630,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 onUploadBusyChange={setExplorerUploadBusy}
                 changesCollapsed={changesCollapsed}
                 onChangesCountChange={setChangesCount}
+                fileSearchOpen={fileSearchOpen}
+                onFileSearchOpenChange={setFileSearchOpen}
               />
             </div>
           )}
@@ -2605,6 +2686,21 @@ function SessionTreeItem({
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const hasChildren = node.children.length > 0;
+  // Aggregate descendant state onto this row, mirroring upstream's subagent
+  // family aggregation: a running/selected subagent surfaces through its
+  // ancestor row even while the subtree is collapsed.
+  const subtreeIds = useMemo(() => {
+    const ids: string[] = [];
+    const walk = (n: SessionTreeNode) => {
+      ids.push(n.session.id);
+      n.children.forEach(walk);
+    };
+    walk(node);
+    return ids;
+  }, [node]);
+  const subtreeRunning = subtreeIds.some((id) => runningSessionIds.has(id));
+  const subtreeUnread = subtreeIds.some((id) => unreadSessionIds.has(id));
+  const subtreeSelected = subtreeIds.some((id) => id === selectedSessionId);
 
   return (
     <div>
@@ -2622,9 +2718,9 @@ function SessionTreeItem({
         )}
         <SessionItem
           session={node.session}
-          isSelected={node.session.id === selectedSessionId}
-          isRunning={runningSessionIds.has(node.session.id)}
-          isUnread={unreadSessionIds.has(node.session.id)}
+          isSelected={subtreeSelected}
+          isRunning={subtreeRunning}
+          isUnread={subtreeUnread}
           onClick={() => onSelectSession(node.session)}
           onRenamed={onRenamed}
           onDeleted={(id) => onSessionDeleted?.(id)}
@@ -3138,7 +3234,7 @@ function SessionItem({
   folderMenuFor?: string | null;
   onFolderMenuFor?: (id: string | null) => void;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const [hovered, setHovered] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
@@ -3430,10 +3526,10 @@ function SessionItem({
               ) : isUnread ? (
                 <UnreadSessionIndicator />
               ) : (
-                <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
+                <span title={session.modified}>{formatRelativeTime(session.modified, locale)}</span>
               )}
               <span>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
-              {session.worktreeBranch && (
+              {session.isWorktree && session.branch && (
                 <span
                   title={`Worktree: ${session.cwd}`}
                   style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}
@@ -3444,7 +3540,7 @@ function SessionItem({
                     <circle cx="6" cy="18" r="3" />
                     <path d="M18 9a9 9 0 0 1-9 9" />
                   </svg>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.worktreeBranch}</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.branch}</span>
                 </span>
               )}
             </div>
@@ -3454,7 +3550,7 @@ function SessionItem({
           {hasChildren && (
             <button
               onClick={(e) => { e.stopPropagation(); onToggleCollapse?.(); }}
-              title={collapsed ? "Expand forks" : "Collapse forks"}
+              title={t(collapsed ? "sidebar.expandSubagents" : "sidebar.collapseSubagents")}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
                 width: 20, height: 20, padding: 0, flexShrink: 0,

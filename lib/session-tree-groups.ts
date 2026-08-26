@@ -134,8 +134,25 @@ export function removeSessionOrganizationReferences(
   deletedSessionId: string,
   sessions: SessionInfo[],
 ): SessionOrganization {
+  // Upstream semantics: subagent children are hidden inside their root's row
+  // and never rendered as their own rows, so they carry no organization
+  // references worth preserving. Fork children do render, so they keep the
+  // inheritance handoff below.
+  const subagentChildIds = new Set(
+    sessions
+      .filter((session) => session.parentSessionId === deletedSessionId
+        && session.relation?.kind === "subagent")
+      .map((session) => session.id),
+  );
   const assignments = { ...org.assignments };
-  const directPlacement = assignments[deletedSessionId];
+  delete assignments[deletedSessionId];
+  for (const id of subagentChildIds) delete assignments[id];
+  const pinned = org.pinned.filter((id) => id !== deletedSessionId && !subagentChildIds.has(id));
+  if (subagentChildIds.size > 0 && pinned.length === org.pinned.length && assignmentsEqual(org.assignments, assignments)) {
+    return { ...org, pinned, assignments };
+  }
+
+  const directPlacement = org.assignments[deletedSessionId];
   // Resolve folder inheritance without pin precedence: a pinned session can
   // still carry a folder assignment that its children must retain after the
   // pinned parent is deleted.
@@ -149,7 +166,8 @@ export function removeSessionOrganizationReferences(
     ? SESSION_ORG_UNGROUPED
     : effectiveFolder;
   const wasPinned = org.pinned.includes(deletedSessionId);
-  const directChildren = sessions.filter((session) => session.parentSessionId === deletedSessionId);
+  const directChildren = sessions.filter((session) =>
+    session.parentSessionId === deletedSessionId && !subagentChildIds.has(session.id));
   // Which children already carry an explicit placement? (Captured before the
   // inheritance loop below writes inherited values into `assignments`.)
   const explicitChildIds = new Set(
@@ -160,9 +178,7 @@ export function removeSessionOrganizationReferences(
       assignments[child.id] = inheritedFolder;
     }
   }
-  delete assignments[deletedSessionId];
 
-  const pinned = org.pinned.filter((id) => id !== deletedSessionId);
   if (wasPinned) {
     // Hand pinned status down ONLY to children that inherited the parent's
     // placement. A child with an explicit folder or explicit-Ungrouped
@@ -174,6 +190,15 @@ export function removeSessionOrganizationReferences(
     }
   }
   return { ...org, pinned, assignments };
+}
+
+function assignmentsEqual(
+  a: Readonly<Record<string, string>>,
+  b: Readonly<Record<string, string>>,
+): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  return aKeys.length === bKeys.length && aKeys.every((key) => a[key] === b[key]);
 }
 
 export function countSessionTreeNodes(nodes: GroupedSessionTreeNode[]): number {
