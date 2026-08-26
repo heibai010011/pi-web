@@ -9,7 +9,7 @@ import { skillExpansionToCommand } from "@/lib/slash-display";
 import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { countSessionTreeNodes, groupSessionTrees, removeSessionOrganizationReferences } from "@/lib/session-tree-groups";
-import { registerAutoSessionFolderDraft, registerSessionFolderDraft, SESSION_ORGANIZATION_CHANGED_EVENT } from "@/lib/session-folder-drafts";
+import { FOLDER_HIGHLIGHT_MS, registerAutoSessionFolderDraft, registerSessionFolderDraft, SESSION_ORGANIZATION_CHANGED_EVENT } from "@/lib/session-folder-drafts";
 import { buildFolderTree, folderDescendantIds, folderSubtreeIds, removeFolderPromotingChildren, wouldCreateFolderCycle, type FolderNode } from "@/lib/session-folder-tree";
 import { buildCurrentWorkSections, splitOlderSessionTrees, type SessionSidebarTimeSection } from "@/lib/session-sidebar-sections";
 import {
@@ -488,6 +488,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     } catch { /* best effort */ }
   }, []);
   const [expandedOlderGroups, setExpandedOlderGroups] = useState<Set<string>>(() => new Set());
+  // Folder rows that just received an auto-classified session; they flash
+  // briefly (FOLDER_HIGHLIGHT_MS) so the silent assignment is noticeable.
+  const [highlightedFolders, setHighlightedFolders] = useState<Set<string>>(() => new Set());
   const toggleOlderGroup = useCallback((groupId: string) => {
     setExpandedOlderGroups((previous) => {
       const next = new Set(previous);
@@ -1068,7 +1071,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const projectKey = selectedProject?.key;
     if (!projectKey) return;
     const onOrganizationChanged = (event: Event) => {
-      const detail = (event as CustomEvent<{ projectKey?: string; org?: unknown }>).detail;
+      const detail = (event as CustomEvent<{ projectKey?: string; org?: unknown; highlightFolderId?: string | null }>).detail;
       if (detail?.projectKey !== projectKey) return;
       const incoming = normalizeSessionOrganization(detail.org);
       if (!incoming) return;
@@ -1079,6 +1082,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         pendingExternalSessionOrgRef.current = incoming;
       }
       replaceSessionOrg(incoming);
+      // Auto-classification landed a session in this folder — flash the row.
+      if (detail.highlightFolderId) {
+        const folderId = detail.highlightFolderId;
+        setHighlightedFolders((prev) => new Set(prev).add(folderId));
+        window.setTimeout(() => {
+          setHighlightedFolders((prev) => {
+            if (!prev.has(folderId)) return prev;
+            const next = new Set(prev);
+            next.delete(folderId);
+            return next;
+          });
+        }, FOLDER_HIGHLIGHT_MS);
+      }
     };
     window.addEventListener(SESSION_ORGANIZATION_CHANGED_EVENT, onOrganizationChanged);
     return () => window.removeEventListener(SESSION_ORGANIZATION_CHANGED_EVENT, onOrganizationChanged);
@@ -2336,6 +2352,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   depth={depth}
                   count={itemCount}
                   collapsed={collapsed}
+                  highlight={highlightedFolders.has(folder.id)}
                   allFolders={sessionOrg.folders}
                   onToggle={() => toggleFolderCollapsed(folder.id)}
                   onRename={(name) => renameFolder(folder.id, name)}
@@ -2799,6 +2816,7 @@ function FolderRow({
   folder,
   count,
   collapsed,
+  highlight = false,
   depth = 0,
   allFolders = [],
   onToggle,
@@ -2812,6 +2830,8 @@ function FolderRow({
   folder: SessionFolder;
   count: number;
   collapsed: boolean;
+  /** True for a short window after an auto-classified session landed here. */
+  highlight?: boolean;
   depth?: number;
   allFolders?: SessionFolder[];
   onToggle: () => void;
@@ -2972,6 +2992,7 @@ function FolderRow({
       onClick={onToggle}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      className={highlight ? "pi-folder-flash" : undefined}
       style={{
         display: "flex", alignItems: "center", gap: 6,
         padding: `6px 12px 6px ${12 + depth * 14}px`,

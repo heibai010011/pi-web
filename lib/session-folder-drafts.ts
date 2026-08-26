@@ -6,6 +6,9 @@ import {
 
 export const SESSION_ORGANIZATION_CHANGED_EVENT = "pi-web:session-organization-changed";
 
+/** Highlight duration (ms) for the folder row that just received a session. */
+export const FOLDER_HIGHLIGHT_MS = 2000;
+
 /** Draft marker: resolve the target folder from folder cwd rules at promotion. */
 export const SESSION_FOLDER_AUTO = "__pi-web-folder-auto__";
 
@@ -120,7 +123,15 @@ export function promoteSessionFolderDraft(
   persistSessionOrganization(next, record.projectKey);
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent(SESSION_ORGANIZATION_CHANGED_EVENT, {
-      detail: { projectKey: record.projectKey, org: next },
+      detail: {
+        projectKey: record.projectKey,
+        org: next,
+        // Same-window UI signal: briefly flash the receiving folder row so a
+        // silent auto-classification is still noticeable.
+        highlightFolderId: assignments[realSessionId] === targetFolderId
+          ? targetFolderId
+          : null,
+      },
     }));
   }
   return { projectKey: record.projectKey, org: next };

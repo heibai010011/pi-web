@@ -1256,6 +1256,21 @@ span.token.table {
   to   { stroke-dashoffset: 0;  opacity: 1; }
 }
 
+/* Folder row flash when an auto-classified session lands in it. Two gentle
+ * accent pulses then a fade-out; matches the 2s JS highlight window. */
+@keyframes folder-flash {
+  0%   { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+  25%  { background: color-mix(in srgb, var(--accent) 4%,  transparent); }
+  50%  { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  75%  { background: color-mix(in srgb, var(--accent) 3%,  transparent); }
+  100% { background: transparent; }
+}
+
+.pi-folder-flash {
+  animation: folder-flash 2s ease-out 1 both;
+  border-radius: 6px;
+}
+
 /* Keep the panel border as the idle separator; this element only expands the hit target. */
 .panel-resize-handle {
   position: relative;
