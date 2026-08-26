@@ -63,7 +63,12 @@ export function normalizeSessionOrganization(value: unknown): SessionOrganizatio
   const assignments = raw.assignments && typeof raw.assignments === "object" && !Array.isArray(raw.assignments)
     ? Object.fromEntries(
         Object.entries(raw.assignments as Record<string, unknown>)
-          .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+          .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+          // Reference integrity: an assignment pointing at a folder id that
+          // does not exist (nor the explicit-Ungrouped sentinel) is dropped,
+          // so dangling references cannot enter the authoritative store.
+          .filter(([, folderId]) => folderId === SESSION_ORG_UNGROUPED
+            || (folders ?? []).some((folder) => folder.id === folderId)),
       )
     : null;
   const collapsedFolders = Array.isArray(raw.collapsedFolders)
