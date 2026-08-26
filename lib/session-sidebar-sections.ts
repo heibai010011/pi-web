@@ -70,11 +70,12 @@ export function buildCurrentWorkSections(
     .map(([id, trees]) => ({ id, trees }));
 }
 
-/** Split roots for the complete view; pinned/important roots can opt out. */
+/** Split roots for the complete view; trees idle beyond 7 local days fold
+ *  into a collapsed "older" group per folder/ungrouped section. */
 export function splitOlderSessionTrees(
   roots: GroupedSessionTreeNode[],
   now = new Date(),
-  days = 30,
+  days = 7,
 ): { recent: GroupedSessionTreeNode[]; older: GroupedSessionTreeNode[] } {
   const cutoff = localDayStart(now, days);
   const recent: GroupedSessionTreeNode[] = [];

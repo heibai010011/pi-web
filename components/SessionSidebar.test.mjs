@@ -72,8 +72,8 @@ test("does not expose disk-backed actions for transient sessions", () => {
 test("folder and pinned groups render parent-child trees instead of flat rows", () => {
   assert.match(source, /const groupedTrees = useMemo\([\s\S]*?groupSessionTrees\(/);
   assert.match(source, /pinnedTree\.map\(\(node\) => renderSessionTree\(node, 0\)\)/);
-  assert.match(source, /recent\.map\(\(node\) => renderSessionTree\(node, 1\)\)/);
-  assert.match(source, /renderOlderTrees\(`folder:\$\{folder\.id\}`, older, 1\)/);
+  assert.match(source, /recent\.map\(\(n\) => renderSessionTree\(n, depth \+ 1\)\)/);
+  assert.match(source, /renderOlderTrees\(`folder:\$\{folder\.id\}`, older, depth \+ 1\)/);
   assert.doesNotMatch(source, /no fork nesting inside those/);
 });
 
@@ -115,7 +115,7 @@ test("sidebar offers remembered Current work and All sessions views", () => {
 test("current work groups complete trees while all view folds older roots per group", () => {
   assert.match(source, /const currentWorkRoots = useMemo\(\(\) => \[[\s\S]*?\.\.\.pinnedTree,[\s\S]*?folderTrees\.get\(folder\.id\)[\s\S]*?\.\.\.ungroupedTree/);
   assert.match(source, /buildCurrentWorkSections\(currentWorkRoots, focusedImportantIds\)/);
-  assert.match(source, /renderOlderTrees\(`folder:\$\{folder\.id\}`, older, 1\)/);
+  assert.match(source, /renderOlderTrees\(`folder:\$\{folder\.id\}`, older, depth \+ 1\)/);
   assert.match(source, /renderOlderTrees\("ungrouped", ungroupedAgeSplit\.older, 0\)/);
   assert.match(source, /flatList \? \{ recent: ungroupedTree, older: \[\] \}/);
 });
@@ -124,4 +124,21 @@ test("folder rows can create a draft session directly in that folder", () => {
   assert.match(source, /onNewSession=\{\(\) => handleNewSessionInFolder\(folder\.id\)\}/);
   assert.match(source, /registerSessionFolderDraft\(draftKey, selectedProject\.key, folderId, temporarySessionId\);\s*onNewSession\?\.\(temporarySessionId, selectedCwd\);/);
   assert.match(source, /title=\{t\("sidebar\.newSessionInFolder"\)\}/);
+});
+
+test("folders render as a nested tree with cycle-safe recursion", () => {
+  assert.match(source, /buildFolderTree\(sessionOrg\.folders\)\.map\(\(root\) => renderFolderNode\(root, 0\)\)/);
+  assert.match(source, /node\.children\.map\(\(child\) => renderFolderNode\(child, depth \+ 1\)\)/);
+  assert.match(source, /onMoveTo=\{\(parentId\) => moveFolderTo\(folder\.id, parentId\)\}/);
+  assert.match(source, /wouldCreateFolderCycle\(org\.folders, folderId, targetParentId\)/);
+  assert.match(source, /removeFolderPromotingChildren\(org\.folders, folderId\)/);
+});
+
+test("new sessions register rule-based auto-classification before composer switch", () => {
+  assert.match(
+    source,
+    /registerAutoSessionFolderDraft\([\s\S]*?selectedProject\.key,\s*selectedCwd,\s*temporarySessionId,\s*\);[\s\S]*?onNewSession\?\.\(temporarySessionId, selectedCwd\);/,
+  );
+  assert.match(source, /onSetRule=\{\(pattern\) => setFolderRule\(folder\.id, pattern\)\}/);
+  assert.match(source, /t\("sidebar\.newSubfolder"\)/);
 });

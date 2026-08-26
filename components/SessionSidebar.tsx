@@ -9,7 +9,8 @@ import { skillExpansionToCommand } from "@/lib/slash-display";
 import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { countSessionTreeNodes, groupSessionTrees, removeSessionOrganizationReferences } from "@/lib/session-tree-groups";
-import { registerSessionFolderDraft, SESSION_ORGANIZATION_CHANGED_EVENT } from "@/lib/session-folder-drafts";
+import { registerAutoSessionFolderDraft, registerSessionFolderDraft, SESSION_ORGANIZATION_CHANGED_EVENT } from "@/lib/session-folder-drafts";
+import { buildFolderTree, folderDescendantIds, folderSubtreeIds, removeFolderPromotingChildren, wouldCreateFolderCycle, type FolderNode } from "@/lib/session-folder-tree";
 import { buildCurrentWorkSections, splitOlderSessionTrees, type SessionSidebarTimeSection } from "@/lib/session-sidebar-sections";
 import {
   beginSessionOrganizationSync,
@@ -978,13 +979,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
   );
 
-  const handleNewSession = useCallback(() => {
-    if (!selectedCwd) return;
-    // Pi is spawned lazily when the user sends the first message.
-    onNewSession?.(createTemporarySessionId(), selectedCwd);
-  }, [selectedCwd, onNewSession]);
-
-
   const recentProjects = getRecentProjects(allSessions);
   const showProjectFilter = recentProjects.length > 8;
   const visibleProjects = projectFilter.trim()
@@ -1131,6 +1125,24 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     onNewSession?.(temporarySessionId, selectedCwd);
   }, [onNewSession, selectedCwd, selectedProject?.key]);
 
+  const handleNewSession = useCallback(() => {
+    if (!selectedCwd) return;
+    const temporarySessionId = createTemporarySessionId();
+    // Rule-based auto-classification (D): register the intent before AppShell
+    // switches composers; the first folder whose cwd rule matches resolves at
+    // promotion. No rule match leaves the session ungrouped.
+    if (selectedProject?.key) {
+      registerAutoSessionFolderDraft(
+        `new:${temporarySessionId}:${selectedCwd}`,
+        selectedProject.key,
+        selectedCwd,
+        temporarySessionId,
+      );
+    }
+    // Pi is spawned lazily when the user sends the first message.
+    onNewSession?.(temporarySessionId, selectedCwd);
+  }, [selectedCwd, selectedProject?.key, onNewSession]);
+
   const togglePinned = useCallback((sessionId: string) => {
     updateSessionOrg((org) => ({
       ...org,
@@ -1140,12 +1152,42 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }));
   }, [updateSessionOrg]);
 
-  const createFolder = useCallback((name: string): string | null => {
+  const createFolder = useCallback((name: string, parentId?: string | null): string | null => {
     const trimmed = name.trim();
     if (!trimmed) return null;
-    const folder: SessionFolder = { id: createFolderId(), name: trimmed };
+    const folder: SessionFolder = {
+      id: createFolderId(),
+      name: trimmed,
+      ...(parentId ? { parentId } : {}),
+    };
     updateSessionOrg((org) => ({ ...org, folders: [...org.folders, folder] }));
     return folder.id;
+  }, [updateSessionOrg]);
+
+  const moveFolderTo = useCallback((folderId: string, targetParentId: string | null) => {
+    updateSessionOrg((org) => {
+      if (targetParentId && wouldCreateFolderCycle(org.folders, folderId, targetParentId)) return org;
+      return {
+        ...org,
+        folders: org.folders.map((f) => (f.id === folderId ? { ...f, parentId: targetParentId } : f)),
+      };
+    });
+  }, [updateSessionOrg]);
+
+  const setFolderRule = useCallback((folderId: string, pattern: string) => {
+    const trimmed = pattern.trim();
+    updateSessionOrg((org) => ({
+      ...org,
+      folders: org.folders.map((f) => {
+        if (f.id !== folderId) return f;
+        if (!trimmed) {
+          const next: SessionFolder = { id: f.id, name: f.name };
+          if (f.parentId) next.parentId = f.parentId;
+          return next;
+        }
+        return { ...f, autoPattern: trimmed };
+      }),
+    }));
   }, [updateSessionOrg]);
 
   const renameFolder = useCallback((folderId: string, name: string) => {
@@ -1158,10 +1200,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [updateSessionOrg]);
 
   const deleteFolder = useCallback((folderId: string) => {
-    // Sessions inside fall back to the ungrouped list; nothing is deleted.
+    // Sessions assigned to this folder fall back to the ungrouped list; its
+    // subfolders are promoted to the deleted folder's own parent. Nothing is
+    // deleted and no session files are touched.
     updateSessionOrg((org) => ({
       ...org,
-      folders: org.folders.filter((f) => f.id !== folderId),
+      folders: removeFolderPromotingChildren(org.folders, folderId),
       assignments: Object.fromEntries(
         Object.entries(org.assignments).filter(([, fid]) => fid !== folderId),
       ),
@@ -2237,29 +2281,44 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           </>
         )}
 
-        {/* Folder groups */}
-        {!loading && !error && effectiveSessionView === "all" && !flatList && sessionOrg.folders.map((folder) => {
-          const trees = folderTrees.get(folder.id) ?? [];
-          const { recent, older } = flatList ? { recent: trees, older: [] } : olderSplit(trees);
-          const itemCount = countSessionTreeNodes(trees);
-          if (itemCount === 0 && hasSearchQuery) return null;
-          const collapsed = sessionOrg.collapsedFolders.includes(folder.id);
-          return (
-            <div key={folder.id}>
-              <FolderRow
-                folder={folder}
-                count={itemCount}
-                collapsed={collapsed}
-                onToggle={() => toggleFolderCollapsed(folder.id)}
-                onRename={(name) => renameFolder(folder.id, name)}
-                onDelete={() => deleteFolder(folder.id)}
-                onNewSession={() => handleNewSessionInFolder(folder.id)}
-              />
-              {!collapsed && recent.map((node) => renderSessionTree(node, 1))}
-              {!collapsed && renderOlderTrees(`folder:${folder.id}`, older, 1)}
-            </div>
-          );
-        })}
+        {/* Folder groups: nested subfolder tree, newest-first within each */}
+        {!loading && !error && effectiveSessionView === "all" && !flatList && (() => {
+          const renderFolderNode = (node: FolderNode, depth: number): ReactNode => {
+            const folder = node.folder;
+            const trees = folderTrees.get(folder.id) ?? [];
+            const { recent, older } = olderSplit(trees);
+            const subtreeIds = folderSubtreeIds(sessionOrg.folders, folder.id);
+            // Aggregated count includes every descendant folder's sessions.
+            let itemCount = 0;
+            for (const id of subtreeIds) {
+              itemCount += countSessionTreeNodes(folderTrees.get(id) ?? []);
+            }
+            if (itemCount === 0 && hasSearchQuery) return null;
+            const collapsed = sessionOrg.collapsedFolders.includes(folder.id);
+            return (
+              <div key={folder.id}>
+                <FolderRow
+                  folder={folder}
+                  depth={depth}
+                  count={itemCount}
+                  collapsed={collapsed}
+                  allFolders={sessionOrg.folders}
+                  onToggle={() => toggleFolderCollapsed(folder.id)}
+                  onRename={(name) => renameFolder(folder.id, name)}
+                  onDelete={() => deleteFolder(folder.id)}
+                  onNewSession={() => handleNewSessionInFolder(folder.id)}
+                  onCreateSubfolder={(name) => createFolder(name, folder.id)}
+                  onSetRule={(pattern) => setFolderRule(folder.id, pattern)}
+                  onMoveTo={(parentId) => moveFolderTo(folder.id, parentId)}
+                />
+                {!collapsed && recent.map((n) => renderSessionTree(n, depth + 1))}
+                {!collapsed && renderOlderTrees(`folder:${folder.id}`, older, depth + 1)}
+                {!collapsed && node.children.map((child) => renderFolderNode(child, depth + 1))}
+              </div>
+            );
+          };
+          return buildFolderTree(sessionOrg.folders).map((root) => renderFolderNode(root, 0));
+        })()}
 
         {/* Ungrouped sessions */}
         {!loading && !error && effectiveSessionView === "all" && (ungroupedTree.length > 0 || (flatList && sessionTree.length > 0)) && (
@@ -2691,28 +2750,54 @@ function SidebarGroupLabel({ label }: { label: string }) {
   );
 }
 
+function MoveTargetButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{ height: 22, padding: "0 8px", fontSize: 11, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: "pointer", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+    >
+      {label}
+    </button>
+  );
+}
+
 function FolderRow({
   folder,
   count,
   collapsed,
+  depth = 0,
+  allFolders = [],
   onToggle,
   onRename,
   onDelete,
   onNewSession,
+  onCreateSubfolder,
+  onSetRule,
+  onMoveTo,
 }: {
   folder: SessionFolder;
   count: number;
   collapsed: boolean;
+  depth?: number;
+  allFolders?: SessionFolder[];
   onToggle: () => void;
   onRename: (name: string) => void;
   onDelete: () => void;
   onNewSession: () => void;
+  onCreateSubfolder?: (name: string) => void;
+  onSetRule?: (pattern: string) => void;
+  onMoveTo?: (parentId: string | null) => void;
 }) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(folder.name);
+  const [subfolderOpen, setSubfolderOpen] = useState(false);
+  const [subfolderValue, setSubfolderValue] = useState("");
+  const [ruleOpen, setRuleOpen] = useState(false);
+  const [ruleValue, setRuleValue] = useState(folder.autoPattern ?? "");
+  const [movingOpen, setMovingOpen] = useState(false);
   const renameCommittedRef = useRef(false);
   const finishRename = (commit: boolean) => {
     if (renameCommittedRef.current) return;
@@ -2720,6 +2805,76 @@ function FolderRow({
     if (commit && renameValue.trim()) onRename(renameValue);
     setRenaming(false);
   };
+
+  const moveCandidates = movingOpen
+    ? allFolders.filter((candidate) => {
+      if (candidate.id === folder.id) return false;
+      const blocked = folderDescendantIds(allFolders, folder.id);
+      if (blocked.has(candidate.id)) return false;
+      // Same-parent entry is a no-op; hide it to reduce noise.
+      return (candidate.parentId ?? null) !== (folder.parentId ?? null);
+    })
+    : [];
+
+  if (subfolderOpen || ruleOpen) {
+    const commit = () => {
+      if (subfolderOpen) {
+        if (subfolderValue.trim()) onCreateSubfolder?.(subfolderValue);
+        setSubfolderOpen(false);
+        setSubfolderValue("");
+      } else {
+        onSetRule?.(ruleValue);
+        setRuleOpen(false);
+      }
+    };
+    return (
+      <div style={{ padding: "4px 10px", paddingLeft: 10 + depth * 14 }}>
+        <input
+          autoFocus
+          value={subfolderOpen ? subfolderValue : ruleValue}
+          onChange={(e) => (subfolderOpen ? setSubfolderValue(e.target.value) : setRuleValue(e.target.value))}
+          placeholder={ruleOpen ? t("sidebar.folderRulePlaceholder") : undefined}
+          onFocus={(e) => e.currentTarget.select()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") { setSubfolderOpen(false); setRuleOpen(false); }
+          }}
+          onBlur={() => commit()}
+          style={{
+            width: "100%", height: 28, padding: "0 8px", fontSize: 12,
+            background: "var(--bg)", border: "1px solid var(--accent)",
+            borderRadius: 6, outline: "none", color: "var(--text)",
+          }}
+        />
+      </div>
+    );
+  }
+
+  if (movingOpen) {
+    return (
+      <div style={{ padding: "4px 10px", paddingLeft: 10 + depth * 14 }}>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>{t("sidebar.moveFolder")}</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+          {(folder.parentId ?? null) !== null && (
+            <MoveTargetButton label={t("sidebar.moveToTopLevel")} onClick={() => { onMoveTo?.(null); setMovingOpen(false); }} />
+          )}
+          {moveCandidates.map((candidate) => (
+            <MoveTargetButton
+              key={candidate.id}
+              label={candidate.name}
+              onClick={() => { onMoveTo?.(candidate.id); setMovingOpen(false); }}
+            />
+          ))}
+          <button
+            onClick={() => setMovingOpen(false)}
+            style={{ height: 22, padding: "0 8px", fontSize: 11, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: "pointer" }}
+          >
+            {t("sidebar.cancel")}
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (renaming) {
     return (
@@ -2773,22 +2928,31 @@ function FolderRow({
       onMouseLeave={() => setHovered(false)}
       style={{
         display: "flex", alignItems: "center", gap: 6,
-        padding: "6px 12px",
+        padding: `6px 12px 6px ${12 + depth * 14}px`,
         marginTop: 6,
         cursor: "pointer",
         background: hovered ? "var(--bg-hover)" : "transparent",
         userSelect: "none",
       }}
     >
-      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}>
+      {depth === 0 && <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}>
         <polyline points="2 3.5 5 6.5 8 3.5" />
-      </svg>
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+      </svg>}
+      {depth > 0 && <span style={{ width: 10, flexShrink: 0 }} />}
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, opacity: depth > 0 ? 0.75 : 1 }}>
         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
       </svg>
       <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 500, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {folder.name}
       </span>
+      {folder.autoPattern && (
+        <span
+          title={t("sidebar.folderRule") + ": " + folder.autoPattern}
+          style={{ fontSize: 9, padding: "1px 4px", borderRadius: 4, background: "var(--bg-hover)", color: "var(--accent)", fontFamily: "var(--font-mono)", flexShrink: 0 }}
+        >
+          zap
+        </span>
+      )}
       <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0, fontFamily: "var(--font-mono)" }}>{count}</span>
       <div
         style={{ display: "flex", gap: 3, flexShrink: 0 }}
@@ -2805,6 +2969,37 @@ function FolderRow({
               <line x1="5" y1="12" x2="19" y2="12" />
             </svg>
           </button>
+          {hovered && onCreateSubfolder && <button
+            onClick={() => { setSubfolderValue(""); setSubfolderOpen(true); }}
+            title={t("sidebar.newSubfolder")}
+            aria-label={t("sidebar.newSubfolder")}
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              <line x1="12" y1="11" x2="12" y2="17" /><line x1="9" y1="14" x2="15" y2="14" />
+            </svg>
+          </button>}
+          {hovered && onSetRule && <button
+            onClick={() => { setRuleValue(folder.autoPattern ?? ""); setRuleOpen(true); }}
+            title={folder.autoPattern ? `${t("sidebar.folderRule")}: ${folder.autoPattern}` : t("sidebar.folderRule")}
+            aria-label={t("sidebar.folderRule")}
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: "none", border: "none", color: folder.autoPattern ? "var(--accent)" : "var(--text-dim)", cursor: "pointer" }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+            </svg>
+          </button>}
+          {hovered && onMoveTo && allFolders.length > 1 && <button
+            onClick={() => setMovingOpen(true)}
+            title={t("sidebar.moveFolder")}
+            aria-label={t("sidebar.moveFolder")}
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M5 12h14" /><polyline points="12 5 19 12 12 19" />
+            </svg>
+          </button>}
           {hovered && <button
             onClick={() => { renameCommittedRef.current = false; setRenameValue(folder.name); setRenaming(true); }}
             title={t("sidebar.renameFolder")}
