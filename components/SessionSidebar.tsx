@@ -502,6 +502,29 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     } catch { /* best effort */ }
   }, []);
   const [expandedOlderGroups, setExpandedOlderGroups] = useState<Set<string>>(() => new Set());
+  // Collapsible time sections in the "current work" view. week/month start
+  // collapsed; active/today/yesterday stay open. Persisted like the view
+  // preference so a reload keeps the user's choices.
+  const [collapsedWorkSections, setCollapsedWorkSections] = useState<Set<string>>(() => {
+    try {
+      const stored = window.localStorage.getItem("pi-web:sidebar-collapsed-work-sections");
+      if (stored) return new Set(JSON.parse(stored) as string[]);
+    } catch { /* best effort */ }
+    return new Set(["week", "month"]);
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("pi-web:sidebar-collapsed-work-sections", JSON.stringify([...collapsedWorkSections]));
+    } catch { /* best effort */ }
+  }, [collapsedWorkSections]);
+  const toggleWorkSection = useCallback((sectionId: string) => {
+    setCollapsedWorkSections((previous) => {
+      const next = new Set(previous);
+      if (next.has(sectionId)) next.delete(sectionId);
+      else next.add(sectionId);
+      return next;
+    });
+  }, []);
   // Folder rows that just received an auto-classified session; they flash
   // briefly (FOLDER_HIGHLIGHT_MS) so the silent assignment is noticeable.
   const [highlightedFolders, setHighlightedFolders] = useState<Set<string>>(() => new Set());
@@ -2377,10 +2400,30 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             week: t("sidebar.last7Days"),
             month: t("sidebar.last30Days"),
           };
+          const collapsed = collapsedWorkSections.has(section.id);
           return (
             <div key={section.id}>
-              <SidebarGroupLabel label={labels[section.id]} />
-              {section.trees.map((node) => renderSessionTree(node, 0))}
+              <button
+                type="button"
+                onClick={() => toggleWorkSection(section.id)}
+                aria-expanded={!collapsed}
+                title={collapsed ? t("sidebar.expandSection", { label: labels[section.id] }) : t("sidebar.collapseSection", { label: labels[section.id] })}
+                style={{
+                  width: "100%", padding: "10px 14px 4px", display: "flex", alignItems: "center", gap: 4,
+                  border: "none", background: "transparent", cursor: "pointer",
+                  fontSize: 10, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase",
+                  color: "var(--text-dim)", userSelect: "none", textAlign: "left",
+                }}
+              >
+                <span style={{ transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s", fontSize: 9, lineHeight: 1 }}>⌄</span>
+                {labels[section.id]}
+                {collapsed && (
+                  <span style={{ marginLeft: 4, fontSize: 9, fontWeight: 500, color: "var(--text-dim)", textTransform: "none", letterSpacing: "normal" }}>
+                    ({section.trees.length})
+                  </span>
+                )}
+              </button>
+              {!collapsed && section.trees.map((node) => renderSessionTree(node, 0))}
             </div>
           );
         })}

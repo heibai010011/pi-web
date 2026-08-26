@@ -241,6 +241,8 @@ export const zhTWLocale: LocalePlugin = {
     "sidebar.olderSessions": "更早的工作階段（{count}）",
     "sidebar.noCurrentWork": "最近 30 天沒有活躍工作階段",
     "sidebar.viewAllSessions": "查看所有工作階段",
+    "sidebar.expandSection": "展開{label}",
+    "sidebar.collapseSection": "摺疊{label}",
     "sidebar.noSearchResults": "沒有相符的工作階段",
     "sidebar.pin": "置頂",
     "sidebar.unpin": "取消置頂",

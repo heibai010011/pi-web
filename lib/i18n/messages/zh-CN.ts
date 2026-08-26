@@ -241,6 +241,8 @@ export const zhCNLocale: LocalePlugin = {
     "sidebar.olderSessions": "更早的会话（{count}）",
     "sidebar.noCurrentWork": "最近 30 天没有活跃会话",
     "sidebar.viewAllSessions": "查看所有会话",
+    "sidebar.expandSection": "展开{label}",
+    "sidebar.collapseSection": "折叠{label}",
     "sidebar.noSearchResults": "没有匹配的会话",
     "sidebar.pin": "置顶",
     "sidebar.unpin": "取消置顶",

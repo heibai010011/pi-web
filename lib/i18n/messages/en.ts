@@ -241,6 +241,8 @@ export const enLocale: LocalePlugin = {
     "sidebar.olderSessions": "Older sessions ({count})",
     "sidebar.noCurrentWork": "No active sessions in the last 30 days",
     "sidebar.viewAllSessions": "View all sessions",
+    "sidebar.expandSection": "Expand {label}",
+    "sidebar.collapseSection": "Collapse {label}",
     "sidebar.noSearchResults": "No matching sessions",
     "sidebar.pin": "Pin",
     "sidebar.unpin": "Unpin",
