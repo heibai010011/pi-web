@@ -39,7 +39,10 @@ function readStore(storePath: string): SessionOrgStore {
     if (!isRecord(parsed) || !isRecord(parsed.projects)) {
       return { version: STORAGE_VERSION, projects: {} };
     }
-    return { version: STORAGE_VERSION, projects: parsed.projects };
+    // Null-prototype copy: a project key like "__proto__" must not leak
+    // through Object.prototype or silently disappear on write.
+    const projects = Object.assign(Object.create(null) as Record<string, unknown>, parsed.projects);
+    return { version: STORAGE_VERSION, projects };
   } catch {
     // Corrupt file: start over rather than blocking the UI.
     return { version: STORAGE_VERSION, projects: {} };
@@ -68,11 +71,16 @@ export function readSessionOrgProjectEntry(
 ): SessionOrgProjectEntry {
   if (!projectKey) return { exists: false, org: EMPTY_SESSION_ORGANIZATION };
   const store = readStore(storePath);
-  const exists = Object.prototype.hasOwnProperty.call(store.projects, projectKey);
-  return {
-    exists,
-    org: normalizeSessionOrganization(store.projects[projectKey]) ?? EMPTY_SESSION_ORGANIZATION,
-  };
+  const has = Object.prototype.hasOwnProperty.call(store.projects, projectKey);
+  // A present-but-malformed record is NOT authoritative empty data: treating
+  // it as an existing empty org would clobber the client's valid folders.
+  // Report it as missing so the local cache wins and no empty write-back
+  // destroys data.
+  if (!has) return { exists: false, org: EMPTY_SESSION_ORGANIZATION };
+  const normalized = normalizeSessionOrganization(store.projects[projectKey]);
+  return normalized
+    ? { exists: true, org: normalized }
+    : { exists: false, org: EMPTY_SESSION_ORGANIZATION };
 }
 
 /** Load one project's organization (server-side). */

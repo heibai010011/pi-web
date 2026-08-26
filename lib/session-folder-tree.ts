@@ -55,7 +55,10 @@ export function buildFolderTree(folders: readonly SessionFolder[]): FolderNode[]
   return roots;
 }
 
-/** True when moving `folderId` under `targetParentId` would create a cycle. */
+/** True when moving `folderId` under `targetParentId` would create a cycle.
+ *  Also returns true when the target's own ancestor chain is already cyclic
+ *  (corrupt metadata) — attaching anything into a loop is always rejected
+ *  instead of looping forever. */
 export function wouldCreateFolderCycle(
   folders: readonly SessionFolder[],
   folderId: string,
@@ -63,9 +66,12 @@ export function wouldCreateFolderCycle(
 ): boolean {
   if (folderId === targetParentId) return true;
   const byId = new Map(folders.map((folder) => [folder.id, folder]));
+  const visited = new Set<string>();
   let current: SessionFolder | undefined = byId.get(targetParentId);
   while (current) {
     if (current.id === folderId) return true;
+    if (visited.has(current.id)) return true; // pre-existing cycle in metadata
+    visited.add(current.id);
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
   return false;
@@ -97,7 +103,9 @@ export function folderSubtreeIds(folders: readonly SessionFolder[], folderId: st
 
 /**
  * Deleting a folder promotes its subfolders to the deleted folder's own
- * parent. Returns the next folders array without the deleted entry.
+ * parent. If the deleted folder sat in (or led into) corrupt metadata, the
+ * promotion target is validated so no child ever ends up pointing at itself,
+ * at the deleted id, or into a loop — those fall back to the top level.
  */
 export function removeFolderPromotingChildren(
   folders: readonly SessionFolder[],
@@ -105,9 +113,15 @@ export function removeFolderPromotingChildren(
 ): SessionFolder[] {
   const deleted = folders.find((folder) => folder.id === folderId);
   const grandparent = deleted?.parentId ?? null;
-  return folders
-    .filter((folder) => folder.id !== folderId)
-    .map((folder) => (
-      folder.parentId === folderId ? { ...folder, parentId: grandparent } : folder
-    ));
+  const remaining = folders.filter((folder) => folder.id !== folderId);
+  const grandparentExists = grandparent !== null
+    && remaining.some((folder) => folder.id === grandparent);
+  return remaining.map((folder) => {
+    if (folder.parentId !== folderId) return folder;
+    if (!grandparentExists || grandparent === folder.id
+      || wouldCreateFolderCycle(remaining, folder.id, grandparent)) {
+      return { ...folder, parentId: null };
+    }
+    return { ...folder, parentId: grandparent };
+  });
 }

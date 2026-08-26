@@ -1006,6 +1006,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setFolderMenuFor(null);
     setBulkSelected(new Set());
     setBulkMode(false);
+    // Folder-row and older-group UI state must not leak into another project
+    // whose folders/groups can share the same ids.
+    setExpandedOlderGroups(new Set());
     pendingSessionOrgMutationsRef.current = [];
     pendingExternalSessionOrgRef.current = null;
 
@@ -1068,7 +1071,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const detail = (event as CustomEvent<{ projectKey?: string; org?: unknown }>).detail;
       if (detail?.projectKey !== projectKey) return;
       const incoming = normalizeSessionOrganization(detail.org);
-      if (incoming) replaceSessionOrg(incoming);
+      if (!incoming) return;
+      // An initial server GET may still be in flight; hold the promoted org
+      // so the sync completion replays it instead of overwriting with the
+      // stale baseline (same rule as cross-tab storage events below).
+      if (sessionOrgLoadingKeyRef.current === projectKey) {
+        pendingExternalSessionOrgRef.current = incoming;
+      }
+      replaceSessionOrg(incoming);
     };
     window.addEventListener(SESSION_ORGANIZATION_CHANGED_EVENT, onOrganizationChanged);
     return () => window.removeEventListener(SESSION_ORGANIZATION_CHANGED_EVENT, onOrganizationChanged);
@@ -1245,10 +1255,43 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setFolderMenuFor((id) => (id === sessionId ? null : id));
   }, []);
 
+  // Per-project activity counts (running / unread) for the workspace selector.
+  // Uses the same stable server key as the project list and filtering.
+  const projectActivity = useMemo(
+    () => getProjectActivity(allSessions, runningSessionIds, unreadSessionIds),
+    [allSessions, runningSessionIds, unreadSessionIds],
+  );
+
+  // Any activity in a project other than the one currently selected — shown as
+  // a dot on the (collapsed) selector button so it is visible without opening
+  // the dropdown.
+  const hasOtherWorkspaceActivity = useMemo(
+    () => [...projectActivity.entries()].some(
+      ([key, { running, unread }]) => key !== selectedProject?.key && (running > 0 || unread > 0),
+    ),
+    [projectActivity, selectedProject],
+  );
+
+  const filteredSessions = selectedProject
+    ? sessionsForProject(allSessions, selectedProject.key)
+    : allSessions;
+  // Free-text search across name + first message (multi-token AND).
+  const searchedSessions = useMemo(
+    () => filteredSessions.filter((s) => sessionMatchesQuery(s, sessionQuery)),
+    [filteredSessions, sessionQuery],
+  );
+  const hasSearchQuery = sessionQuery.trim().length > 0;
+
   const bulkDelete = useCallback(async () => {
     if (bulkDeleting) return;
-    // Running sessions are protected: never delete one mid-run.
-    const targets = [...bulkSelected].filter((id) => !runningSessionIds.has(id));
+    // Only sessions visible under the CURRENT search/filter can be deleted.
+    // Otherwise a stale selection from an earlier search would silently
+    // delete rows the user can no longer see. Running sessions are
+    // protected: never delete one mid-run.
+    const visibleIds = new Set(searchedSessions.map((s) => s.id));
+    const targets = [...bulkSelected]
+      .filter((id) => visibleIds.has(id))
+      .filter((id) => !runningSessionIds.has(id));
     if (targets.length === 0) return;
     // Delete ancestors before descendants so each parent's effective
     // organization can be handed down through the chain before the child is
@@ -1287,34 +1330,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       setBulkDeleting(false);
       exitBulkMode();
     }
-  }, [allSessions, bulkDeleting, bulkSelected, runningSessionIds, hideDeletedSession, onSessionDeleted, loadSessions, exitBulkMode, updateSessionOrg]);
+  }, [allSessions, searchedSessions, bulkDeleting, bulkSelected, runningSessionIds, hideDeletedSession, onSessionDeleted, loadSessions, exitBulkMode, updateSessionOrg]);
 
-  // Per-project activity counts (running / unread) for the workspace selector.
-  // Uses the same stable server key as the project list and filtering.
-  const projectActivity = useMemo(
-    () => getProjectActivity(allSessions, runningSessionIds, unreadSessionIds),
-    [allSessions, runningSessionIds, unreadSessionIds],
-  );
-
-  // Any activity in a project other than the one currently selected — shown as
-  // a dot on the (collapsed) selector button so it is visible without opening
-  // the dropdown.
-  const hasOtherWorkspaceActivity = useMemo(
-    () => [...projectActivity.entries()].some(
-      ([key, { running, unread }]) => key !== selectedProject?.key && (running > 0 || unread > 0),
-    ),
-    [projectActivity, selectedProject],
-  );
-
-  const filteredSessions = selectedProject
-    ? sessionsForProject(allSessions, selectedProject.key)
-    : allSessions;
-  // Free-text search across name + first message (multi-token AND).
-  const searchedSessions = useMemo(
-    () => filteredSessions.filter((s) => sessionMatchesQuery(s, sessionQuery)),
-    [filteredSessions, sessionQuery],
-  );
-  const hasSearchQuery = sessionQuery.trim().length > 0;
   const showWorktreeSwitcher = Boolean(
     worktreeState?.isGit
     && worktreeState.isTopLevel
@@ -1352,17 +1369,30 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const sessionTree = flatList
     ? searchedSessions.map((s) => ({ session: s, children: [] as SessionTreeNode[] }))
     : buildSessionTree(searchedSessions);
+  // Rows always read the REAL pin state — flattening search results must not
+  // fake them into looking unpinned (the pin action would then unpin).
   const pinnedIds = useMemo(
-    () => new Set(flatList ? [] : sessionOrg.pinned.filter((id) => searchedSessions.some((s) => s.id === id))),
+    () => new Set(flatList
+      ? sessionOrg.pinned
+      : sessionOrg.pinned.filter((id) => searchedSessions.some((s) => s.id === id))),
     [flatList, sessionOrg.pinned, searchedSessions],
   );
   const groupedTrees = useMemo(() => {
     if (flatList) {
+      // Rendering stays flat, but rows still show their REAL pin/folder
+      // state: an empty map would make pinned/foldered rows look ungrouped
+      // and invert their organization actions (pin → unpin).
+      const real = groupSessionTrees(
+        searchedSessions,
+        new Set(sessionOrg.pinned),
+        sessionOrg.assignments,
+        new Set(sessionOrg.folders.map((folder) => folder.id)),
+      );
       return {
         pinned: [],
         folders: new Map<string, SessionTreeNode[]>(),
         ungrouped: sessionTree,
-        effectiveFolderBySessionId: new Map<string, string | null>(),
+        effectiveFolderBySessionId: real.effectiveFolderBySessionId,
       };
     }
     return groupSessionTrees(
@@ -1371,7 +1401,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       sessionOrg.assignments,
       new Set(sessionOrg.folders.map((folder) => folder.id)),
     );
-  }, [flatList, sessionTree, searchedSessions, pinnedIds, sessionOrg.assignments, sessionOrg.folders]);
+  }, [flatList, sessionTree, searchedSessions, pinnedIds, sessionOrg.pinned, sessionOrg.assignments, sessionOrg.folders]);
   const pinnedTree = groupedTrees.pinned;
   const folderTrees = groupedTrees.folders;
   const effectiveFolderBySessionId = groupedTrees.effectiveFolderBySessionId;
@@ -2198,7 +2228,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             <button
               onClick={() => {
                 const selectable = searchedSessions.filter((s) => !runningSessionIds.has(s.id)).map((s) => s.id);
-                setBulkSelected((prev) => prev.size === selectable.length ? new Set() : new Set(selectable));
+                // Compare membership, not sizes: a stale selection from a
+                // different search can coincidentally have the same count.
+                const allSelected = selectable.length > 0
+                  && selectable.every((id) => bulkSelected.has(id));
+                setBulkSelected(allSelected ? new Set() : new Set(selectable));
               }}
               style={{
                 height: 26, padding: "0 10px", fontSize: 11,
@@ -2296,7 +2330,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             if (itemCount === 0 && hasSearchQuery) return null;
             const collapsed = sessionOrg.collapsedFolders.includes(folder.id);
             return (
-              <div key={folder.id}>
+              <div key={`${selectedProject?.key ?? ""}:${folder.id}`}>
                 <FolderRow
                   folder={folder}
                   depth={depth}
@@ -2793,17 +2827,28 @@ function FolderRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(folder.name);
+  const [renameDirty, setRenameDirty] = useState(false);
   const [subfolderOpen, setSubfolderOpen] = useState(false);
   const [subfolderValue, setSubfolderValue] = useState("");
   const [ruleOpen, setRuleOpen] = useState(false);
   const [ruleValue, setRuleValue] = useState(folder.autoPattern ?? "");
+  const [ruleDirty, setRuleDirty] = useState(false);
   const [movingOpen, setMovingOpen] = useState(false);
   const renameCommittedRef = useRef(false);
+  // While an editor is open but untouched, follow external updates (another
+  // tab renamed the folder). Once the user typed, their edit wins.
+  useEffect(() => {
+    if (renaming && !renameDirty) setRenameValue(folder.name);
+  }, [folder.name, renaming, renameDirty]);
+  useEffect(() => {
+    if (ruleOpen && !ruleDirty) setRuleValue(folder.autoPattern ?? "");
+  }, [folder.autoPattern, ruleOpen, ruleDirty]);
   const finishRename = (commit: boolean) => {
     if (renameCommittedRef.current) return;
     renameCommittedRef.current = true;
     if (commit && renameValue.trim()) onRename(renameValue);
     setRenaming(false);
+    setRenameDirty(false);
   };
 
   const moveCandidates = movingOpen
@@ -2811,8 +2856,8 @@ function FolderRow({
       if (candidate.id === folder.id) return false;
       const blocked = folderDescendantIds(allFolders, folder.id);
       if (blocked.has(candidate.id)) return false;
-      // Same-parent entry is a no-op; hide it to reduce noise.
-      return (candidate.parentId ?? null) !== (folder.parentId ?? null);
+      // The current parent is already selected; hide only that no-op target.
+      return candidate.id !== (folder.parentId ?? null);
     })
     : [];
 
@@ -2825,6 +2870,7 @@ function FolderRow({
       } else {
         onSetRule?.(ruleValue);
         setRuleOpen(false);
+        setRuleDirty(false);
       }
     };
     return (
@@ -2832,12 +2878,12 @@ function FolderRow({
         <input
           autoFocus
           value={subfolderOpen ? subfolderValue : ruleValue}
-          onChange={(e) => (subfolderOpen ? setSubfolderValue(e.target.value) : setRuleValue(e.target.value))}
+          onChange={(e) => (subfolderOpen ? setSubfolderValue(e.target.value) : (setRuleDirty(true), setRuleValue(e.target.value)))}
           placeholder={ruleOpen ? t("sidebar.folderRulePlaceholder") : undefined}
           onFocus={(e) => e.currentTarget.select()}
           onKeyDown={(e) => {
             if (e.key === "Enter") commit();
-            if (e.key === "Escape") { setSubfolderOpen(false); setRuleOpen(false); }
+            if (e.key === "Escape") { setSubfolderOpen(false); setRuleOpen(false); setRuleDirty(false); }
           }}
           onBlur={() => commit()}
           style={{
@@ -2882,7 +2928,7 @@ function FolderRow({
         <input
           autoFocus
           value={renameValue}
-          onChange={(e) => setRenameValue(e.target.value)}
+          onChange={(e) => { setRenameDirty(true); setRenameValue(e.target.value); }}
           onFocus={(e) => e.currentTarget.select()}
           onKeyDown={(e) => {
             if (e.key === "Enter" && renameValue.trim()) finishRename(true);

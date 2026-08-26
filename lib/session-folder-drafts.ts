@@ -16,6 +16,12 @@ interface PendingFolderDraft {
   temporarySessionId: string;
   /** The cwd the composer was opened with; drives rule resolution. */
   cwd: string;
+  /**
+   * True once a real server session is being created for this draft. Such an
+   * intent outlives composer navigation — the session file is about to exist,
+   * so discarding the intent would strand the session in the wrong group.
+   */
+  claimed?: boolean;
 }
 
 declare global {
@@ -57,11 +63,22 @@ export function registerAutoSessionFolderDraft(
 
 export function discardSessionFolderDraft(draftKey: string | null | undefined): void {
   if (!draftKey) return;
-  if (!pendingDrafts.has(draftKey)) return;
+  const record = pendingDrafts.get(draftKey);
+  if (!record) return;
+  // A claimed draft maps to a real session being created right now; its
+  // folder intent must survive navigation and be resolved at promotion.
+  if (record.claimed) return;
   pendingDrafts.delete(draftKey);
 
   // No organization mutation is needed: a draft has no persisted session row
   // and its folder intent lives only in the pending record above.
+}
+
+/** Mark a draft as backed by a real server session being created now. */
+export function claimSessionFolderDraft(draftKey: string | null | undefined): void {
+  if (!draftKey) return;
+  const record = pendingDrafts.get(draftKey);
+  if (record) record.claimed = true;
 }
 
 function resolveTargetFolderId(org: SessionOrganization, record: PendingFolderDraft): string | null {

@@ -19,6 +19,7 @@ import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-prese
 import { getToolNamesForPreset, type ToolEntry, type ToolPreset } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { userMessageKey } from "@/lib/prompt-recovery";
+import { claimSessionFolderDraft, promoteSessionFolderDraft } from "@/lib/session-folder-drafts";
 import { AgentEventConnection } from "@/lib/agent-event-connection";
 import { getToolExecutionProgress } from "@/lib/tool-execution-progress";
 import {
@@ -631,6 +632,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       };
       const realId = result.sessionId;
       sessionIdRef.current = realId;
+      // A real server session now exists (or is seconds away). Claim the
+      // folder intent so composer navigation cannot discard it, and promote
+      // immediately — the session must land in its folder even if the user
+      // leaves before the first prompt finishes (or never sends one).
+      if (newSessionDraftKey) {
+        claimSessionFolderDraft(newSessionDraftKey);
+        promoteSessionFolderDraft(newSessionDraftKey, realId);
+      }
       if (result.model && newSessionModelOverrideRef.current === selectedModel) {
         setPendingModel(result.model);
         if (!selectedModel) setNewSessionDefaultModel(result.model);
@@ -650,7 +659,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [isNew, newSessionCwd, toolPreset]);
+  }, [isNew, newSessionCwd, toolPreset, newSessionDraftKey]);
 
   // Opening the System panel is also allowed to initialize an otherwise dormant
   // session. This is deliberately a non-prompt command: it creates no message

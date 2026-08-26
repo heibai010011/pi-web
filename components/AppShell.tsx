@@ -20,7 +20,7 @@ import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
-import { discardSessionFolderDraft, promoteSessionFolderDraft } from "@/lib/session-folder-drafts";
+import { discardSessionFolderDraft, promoteSessionFolderDraft, registerAutoSessionFolderDraft } from "@/lib/session-folder-drafts";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import {
@@ -490,6 +490,16 @@ export function AppShell() {
       });
   }, [router]);
 
+  // Every fresh-composer entry (keyboard shortcut, workspace switch, delete
+  // replacement) must pass through the same auto-classify boundary as the
+  // sidebar New button. The project key may still be hydrating, in which
+  // case the intent simply stays unregistered and the session is ungrouped.
+  const registerAutoSessionFolderDraftFor = useCallback((draftKey: string, cwd: string, temporarySessionId: string) => {
+    const projectKey = activeProjectKeyRef.current;
+    if (!projectKey) return;
+    registerAutoSessionFolderDraft(draftKey, projectKey, cwd, temporarySessionId);
+  }, []);
+
   const handleCwdChange = useCallback((
     cwd: string | null,
     projectRoot?: string | null,
@@ -531,6 +541,7 @@ export function AppShell() {
     setNewSessionDraftId(draftId);
     discardSessionFolderDraft(activeNewSessionDraftKeyRef.current);
     activeNewSessionDraftKeyRef.current = `new:${draftId}:${cwd}`;
+    registerAutoSessionFolderDraftFor(`new:${draftId}:${cwd}`, cwd, draftId);
     setSelectedSession(null);
     setNewSessionCwd((prev) => {
       if (prev && prev !== cwd) return null;
@@ -553,7 +564,7 @@ export function AppShell() {
       restoreWorkspaceContext(newProject);
     }
     router.replace("/", { scroll: false });
-  }, [activeCwd, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);
+  }, [activeCwd, invalidateWorkspaceRestore, newSessionCwd, registerAutoSessionFolderDraftFor, router, selectedSession, restoreWorkspaceContext]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     invalidateWorkspaceRestore();
@@ -611,7 +622,11 @@ export function AppShell() {
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
-    onNewSession: (cwd: string) => handleNewSession(`kb-${Date.now()}`, cwd),
+    onNewSession: (cwd: string) => {
+      const sessionId = `kb-${Date.now()}`;
+      registerAutoSessionFolderDraftFor(`new:${sessionId}:${cwd}`, cwd, sessionId);
+      handleNewSession(sessionId, cwd);
+    },
     activeCwd,
   });
 
@@ -778,6 +793,7 @@ export function AppShell() {
         : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
       setNewSessionDraftId(draftId);
       activeNewSessionDraftKeyRef.current = cwd ? `new:${draftId}:${cwd}` : null;
+      if (cwd) registerAutoSessionFolderDraftFor(`new:${draftId}:${cwd}`, cwd, draftId);
       setSelectedSession(null);
       setNewSessionCwd(cwd ?? null);
       setSessionKey((k) => k + 1);
@@ -788,7 +804,7 @@ export function AppShell() {
       setActiveTopPanel(null);
       router.replace("/", { scroll: false });
     }
-  }, [invalidateWorkspaceRestore, selectedSession, router]);
+  }, [invalidateWorkspaceRestore, registerAutoSessionFolderDraftFor, selectedSession, router]);
 
   const handleOpenFile = useCallback((
     filePath: string,

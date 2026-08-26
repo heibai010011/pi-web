@@ -55,6 +55,10 @@ export function normalizeSessionOrganization(value: unknown): SessionOrganizatio
           }
           return { id: (folder as SessionFolder).id, name: (folder as SessionFolder).name, ...autoPattern };        })
         .filter((f): f is SessionFolder => f !== null)
+        // Duplicate folder ids corrupt every id-keyed structure downstream
+        // (tree maps, counts, menus). Keep the first occurrence only —
+        // deterministic for legacy stores and API payloads alike.
+        .filter((f, index, list) => list.findIndex((other) => other.id === f.id) === index)
     : null;
   const assignments = raw.assignments && typeof raw.assignments === "object" && !Array.isArray(raw.assignments)
     ? Object.fromEntries(

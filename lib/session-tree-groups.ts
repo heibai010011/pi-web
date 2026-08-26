@@ -150,6 +150,11 @@ export function removeSessionOrganizationReferences(
     : effectiveFolder;
   const wasPinned = org.pinned.includes(deletedSessionId);
   const directChildren = sessions.filter((session) => session.parentSessionId === deletedSessionId);
+  // Which children already carry an explicit placement? (Captured before the
+  // inheritance loop below writes inherited values into `assignments`.)
+  const explicitChildIds = new Set(
+    directChildren.filter((child) => org.assignments[child.id] !== undefined).map((child) => child.id),
+  );
   for (const child of directChildren) {
     if (assignments[child.id] === undefined && inheritedFolder !== null) {
       assignments[child.id] = inheritedFolder;
@@ -159,7 +164,12 @@ export function removeSessionOrganizationReferences(
 
   const pinned = org.pinned.filter((id) => id !== deletedSessionId);
   if (wasPinned) {
+    // Hand pinned status down ONLY to children that inherited the parent's
+    // placement. A child with an explicit folder or explicit-Ungrouped
+    // assignment keeps that assignment — pinning it would override the
+    // assignment (pin precedence) and silently move it out of its folder.
     for (const child of directChildren.toReversed()) {
+      if (explicitChildIds.has(child.id)) continue;
       if (!pinned.includes(child.id)) pinned.unshift(child.id);
     }
   }
