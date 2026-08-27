@@ -18,6 +18,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { AppUpdateResponse } from "@/lib/api-types";
 import type { ToolEntry } from "@/lib/tool-presets";
+import { getPermissionPromptOptions, isPermissionSystemPromptTitle, parsePermissionPrompt, splitPermissionPromptTitle, type PermissionPromptDetails } from "@/lib/permission-prompt";
 import {
   captureScrollDistance,
   getPromptAnchorSpacerHeight,
@@ -303,6 +304,12 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
   });
   const sessionBusy = agentRunning || bashRunning;
+  const permissionRequest = extensionDialog
+    && (extensionDialog.method === "select" || extensionDialog.method === "input")
+    && isPermissionSystemPromptTitle(extensionDialog.title)
+    ? extensionDialog
+    : null;
+  const modalExtensionDialog = permissionRequest ? null : extensionDialog;
 
   useEffect(() => {
     if (
@@ -660,9 +667,9 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
         </div>
       )}
 
-      {extensionDialog && (
+      {modalExtensionDialog && (
         <ExtensionDialog
-          request={extensionDialog}
+          request={modalExtensionDialog}
           onRespond={respondToExtensionUi}
         />
       )}
@@ -922,6 +929,13 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
               <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
             )}
 
+            {permissionRequest && (
+              <InlinePermissionRequest
+                request={permissionRequest}
+                onRespond={respondToExtensionUi}
+              />
+            )}
+
             {agentRunning && !hasStreamingContent && agentPhase && (
               <div className="break-words py-2 text-[13px] text-text-muted">
                 <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t)}</span>
@@ -1076,6 +1090,99 @@ function NoticeShelf({ notices, floating = false, onPauseChange }: { notices: No
 
 type ExtensionDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
 
+type PermissionExtensionRequest = Extract<ExtensionUiRequest, { method: "select" | "input" }>;
+
+function InlinePermissionRequest({
+  request,
+  onRespond,
+}: {
+  request: PermissionExtensionRequest;
+  onRespond: (request: ExtensionDialogRequest, response: { value: string } | { confirmed: boolean } | { cancelled: true }) => void;
+}) {
+  const { t } = useI18n();
+  const split = splitPermissionPromptTitle(request.title);
+  const details = request.method === "select" ? parsePermissionPrompt(request.title, request.options) : null;
+  const options = request.method === "select" ? getPermissionPromptOptions(request.options) : null;
+  const subagent = details?.subagent ?? /\(Subagent\)/i.test(split.title);
+
+  return (
+    <section className="permission-request-card" aria-label={t("chat.permissionRequired")}>
+      <header className="permission-request-card-header">
+        <PermissionShieldIcon />
+        <div className="permission-request-card-heading">
+          <div className="permission-request-card-title">{t("chat.permissionRequired")}</div>
+          <div className="permission-request-card-subtitle">
+            {request.method === "input"
+              ? t("chat.permissionReasonPrompt")
+              : subagent ? t("chat.permissionSubagentRequest") : t("chat.permissionRequest")}
+          </div>
+        </div>
+        <span className="permission-request-card-state">{t("chat.permissionWaiting")}</span>
+      </header>
+      {request.method === "select" && details && options ? (
+        <PermissionPromptCard
+          details={details}
+          options={options}
+          onChoose={(option) => onRespond(request, { value: option })}
+        />
+      ) : request.method === "select" ? (
+        <PermissionScopeChoice
+          message={split.message}
+          options={request.options}
+          onChoose={(option) => onRespond(request, { value: option })}
+        />
+      ) : (
+        <PermissionReasonInput
+          message={split.message}
+          placeholder={request.placeholder}
+          onCancel={() => onRespond(request, { cancelled: true })}
+          onSubmit={(value) => onRespond(request, { value })}
+        />
+      )}
+    </section>
+  );
+}
+
+function PermissionScopeChoice({ message, options, onChoose }: { message: string; options: string[]; onChoose: (option: string) => void }) {
+  return (
+    <div className="permission-request-body">
+      {message && <div className="permission-request-message">{message}</div>}
+      <div className="permission-request-scope-actions">
+        {options.map((option, index) => (
+          <button key={option} className={`permission-request-action ${index === 0 ? "is-allow" : "is-allowSecondary"}`} onClick={() => onChoose(option)}>
+            {option}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PermissionReasonInput({ message, placeholder, onCancel, onSubmit }: { message: string; placeholder?: string; onCancel: () => void; onSubmit: (value: string) => void }) {
+  const { t } = useI18n();
+  const [reason, setReason] = useState("");
+  return (
+    <div className="permission-request-body">
+      {message && <div className="permission-request-message">{message}</div>}
+      <textarea
+        autoFocus
+        className="permission-request-reason-input"
+        value={reason}
+        placeholder={placeholder ?? t("chat.permissionReasonPlaceholder")}
+        onChange={(event) => setReason(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") onCancel();
+          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") onSubmit(reason);
+        }}
+      />
+      <div className="permission-request-actions">
+        <button className="permission-request-action" onClick={onCancel}>{t("chat.cancel")}</button>
+        <button className="permission-request-action is-deny" onClick={() => onSubmit(reason)}>{t("chat.permissionSubmitDenial")}</button>
+      </div>
+    </div>
+  );
+}
+
 function ExtensionDialog({
   request,
   onRespond,
@@ -1085,6 +1192,12 @@ function ExtensionDialog({
 }) {
   const { t } = useI18n();
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
+  const permissionDetails = request.method === "select"
+    ? parsePermissionPrompt(request.title, request.options)
+    : null;
+  const permissionOptions = request.method === "select"
+    ? getPermissionPromptOptions(request.options)
+    : null;
 
   useEffect(() => {
     setValue(request.method === "editor" ? request.prefill ?? "" : "");
@@ -1127,8 +1240,19 @@ function ExtensionDialog({
         }}
       >
         <div style={{ flexShrink: 0, padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
-          <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650 }}>{request.title}</div>
-          <div style={{ marginTop: 3, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>{t("chat.extensionRequest")}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+            {permissionDetails && <PermissionShieldIcon />}
+            <div style={{ minWidth: 0 }}>
+              <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650 }}>
+                {permissionDetails ? t("chat.permissionRequired") : request.title}
+              </div>
+              <div style={{ marginTop: 3, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
+                {permissionDetails
+                  ? permissionDetails.subagent ? t("chat.permissionSubagentRequest") : t("chat.permissionRequest")
+                  : t("chat.extensionRequest")}
+              </div>
+            </div>
+          </div>
         </div>
 
         <div
@@ -1142,7 +1266,13 @@ function ExtensionDialog({
           {request.method === "confirm" && (
             <div style={{ color: "var(--text-muted)", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{request.message}</div>
           )}
-          {request.method === "select" && (
+          {request.method === "select" && permissionDetails && permissionOptions ? (
+            <PermissionPromptCard
+              details={permissionDetails}
+              options={permissionOptions}
+              onChoose={(option) => onRespond(request, { value: option })}
+            />
+          ) : request.method === "select" ? (
             <div style={{ display: "grid", gap: 8 }}>
               {request.options.map((option) => (
                 <button
@@ -1165,7 +1295,7 @@ function ExtensionDialog({
                 </button>
               ))}
             </div>
-          )}
+          ) : null}
           {request.method === "input" && (
             <input
               autoFocus
@@ -1215,7 +1345,7 @@ function ExtensionDialog({
           )}
         </div>
 
-        <div style={{ flexShrink: 0, display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+        <div style={{ flexShrink: 0, display: permissionDetails ? "none" : "flex", justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
           <button
             onClick={() => onRespond(request, { cancelled: true })}
             style={{
@@ -1261,6 +1391,93 @@ function ExtensionDialog({
         </div>
       </div>
     </div>
+  );
+}
+
+function PermissionShieldIcon() {
+  return (
+    <span className="permission-request-icon">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M12 3 5.5 5.8v5.1c0 4.4 2.7 8.3 6.5 10.1 3.8-1.8 6.5-5.7 6.5-10.1V5.8L12 3Z" />
+        <path d="M12 8v4" />
+        <path d="M12 16h.01" />
+      </svg>
+    </span>
+  );
+}
+
+function PermissionPromptCard({
+  details,
+  options,
+  onChoose,
+}: {
+  details: PermissionPromptDetails;
+  options: NonNullable<ReturnType<typeof getPermissionPromptOptions>>;
+  onChoose: (option: string) => void;
+}) {
+  const { t } = useI18n();
+  const [showRaw, setShowRaw] = useState(false);
+  const rows = [
+    details.agent ? { label: t("chat.permissionAgent"), value: details.agent } : null,
+    details.subject ? {
+      label: details.subjectLabel === "command"
+        ? t("chat.permissionCommand")
+        : details.subjectLabel === "skill"
+          ? t("chat.permissionSkill")
+          : t("chat.permissionTool"),
+      value: details.subject,
+      code: details.subjectLabel === "command",
+    } : null,
+    details.target ? { label: t("chat.permissionTarget"), value: details.target, code: true } : null,
+    details.matchedPattern ? { label: t("chat.permissionMatchedRule"), value: details.matchedPattern, code: true } : null,
+    details.workingDirectory ? { label: t("chat.permissionWorkingDirectory"), value: details.workingDirectory, code: true } : null,
+  ].filter(Boolean) as { label: string; value: string; code?: boolean }[];
+
+  return (
+    <div className="permission-request-body">
+      {rows.length > 0 ? (
+        <div className="permission-request-facts">
+          {rows.map((row, index) => (
+            <div key={`${row.label}:${index}`} className="permission-request-fact">
+              <span className="permission-request-fact-label">{row.label}</span>
+              <span className={`permission-request-fact-value${row.code ? " is-code" : ""}`}>{row.value}</span>
+            </div>
+          ))}
+          {details.externalPaths?.length ? (
+            <div className="permission-request-fact">
+              <span className="permission-request-fact-label">{t("chat.permissionExternalPaths")}</span>
+              <div className="permission-request-paths">
+                {details.externalPaths.map((path) => <code key={path}>{path}</code>)}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="permission-request-message">{details.message}</div>
+      )}
+
+      {(details.fullCommand || rows.length > 0) && (
+        <button className="permission-request-details-toggle" onClick={() => setShowRaw((shown) => !shown)}>
+          {showRaw ? t("chat.permissionHideDetails") : t("chat.permissionShowDetails")}
+        </button>
+      )}
+      {showRaw && <pre className="permission-request-raw">{details.fullCommand ?? details.message}</pre>}
+
+      <div className="permission-request-actions">
+        <PermissionDecisionButton label={t("chat.permissionAllowOnce")} tone="allow" onClick={() => onChoose(options.approve)} />
+        {options.approveForSession && <PermissionDecisionButton label={t("chat.permissionAllowSession")} tone="allowSecondary" onClick={() => onChoose(options.approveForSession!)} />}
+        <PermissionDecisionButton label={t("chat.permissionDeny")} tone="deny" onClick={() => onChoose(options.deny)} />
+        {options.denyWithReason && <PermissionDecisionButton label={t("chat.permissionDenyReason")} tone="neutral" onClick={() => onChoose(options.denyWithReason!)} />}
+      </div>
+    </div>
+  );
+}
+
+function PermissionDecisionButton({ label, tone, onClick }: { label: string; tone: "allow" | "allowSecondary" | "deny" | "neutral"; onClick: () => void }) {
+  return (
+    <button className={`permission-request-action is-${tone}`} onClick={onClick}>
+      {label}
+    </button>
   );
 }
 
