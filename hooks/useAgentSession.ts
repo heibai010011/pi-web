@@ -627,7 +627,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const promise = (async () => {
       // Only send explicit user overrides. The server resolves the current
       // enabledModels scope atomically with AgentSession construction.
-      const selectedModel = newSessionModelOverrideRef.current;
+      const requestedModel = newSessionModelOverrideRef.current;
+      const selectedModel = requestedModel && modelList.some(
+        (model) => model.provider === requestedModel.provider && model.id === requestedModel.modelId,
+      )
+        ? requestedModel
+        : null;
+      // A model configuration change can leave an already-open composer with
+      // an explicit selection that no longer exists. Do not send that stale
+      // provider/model pair to session startup; let the server select the
+      // current scoped default instead.
+      if (requestedModel && !selectedModel) {
+        newSessionModelOverrideRef.current = null;
+        setNewSessionModel(null);
+        setPendingModel(null);
+      }
       const selectedThinkingLevel = thinkingLevelOverrideRef.current;
       if (selectedModel) setPendingModel(selectedModel);
       const toolNames = getToolNamesForPreset(toolPreset);
@@ -644,12 +658,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             : {}),
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const result = await res.json() as {
-        sessionId: string;
+      const result = await res.json().catch(() => ({})) as {
+        error?: string;
+        sessionId?: string;
         model?: SelectedModel | null;
         thinkingLevel?: ThinkingLevelOption;
       };
+      if (!res.ok) throw new Error(result.error ?? `HTTP ${res.status}`);
+      if (!result.sessionId) throw new Error("Session creation returned no session ID");
       const realId = result.sessionId;
       sessionIdRef.current = realId;
       // A real server session now exists (or is seconds away). Claim the
@@ -679,7 +695,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [isNew, newSessionCwd, toolPreset, newSessionDraftKey]);
+  }, [isNew, newSessionCwd, toolPreset, newSessionDraftKey, modelList]);
 
   // Opening the System or Tools panel may initialize an otherwise dormant
   // session. This is deliberately a non-prompt command: it creates no message

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Preparing Pi Web…</title>
+  <style>
+    :root { color-scheme: light dark; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: #1a1a1a; color: #a3a3a3; }
+    p { font-size: 12px; }
+  </style>
+</head>
+<body>
+  <p>Preparing Pi Web…</p>
+  <script>
+    (async function () {
+      try {
+        const registrations = "serviceWorker" in navigator
+          ? await navigator.serviceWorker.getRegistrations()
+          : [];
+        const cacheKeys = "caches" in window ? await caches.keys() : [];
+        await Promise.all([
+          ...registrations.map((registration) => registration.unregister()),
+          ...cacheKeys.filter((key) => key.startsWith("pi-web-")).map((key) => caches.delete(key)),
+        ]);
+      } catch (error) {
+        console.warn("Failed to clean stale Pi Web service worker:", error);
+      } finally {
+        document.cookie = "pi-web-dev-sw-clean=1; Path=/; SameSite=Lax";
+        const target = new URLSearchParams(location.search).get("return");
+        location.replace(target && target.startsWith("/") && !target.startsWith("//") ? target : "/");
+      }
+    })();
+  </script>
+</body>
+</html>

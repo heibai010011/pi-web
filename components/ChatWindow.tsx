@@ -455,7 +455,6 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
   }, [messages.length]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
-  const hasStreamingContent = Boolean(streamState.streamingMessage?.content.length);
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
   const messageContentRef = useRef<HTMLDivElement | null>(null);
   const promptAnchorSpacerRef = useRef<HTMLDivElement | null>(null);
@@ -925,7 +924,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
                 </>
               );
             })()}
-            {streamState.isStreaming && hasStreamingContent && streamState.streamingMessage && (
+            {streamState.isStreaming && Boolean(streamState.streamingMessage?.content.length) && streamState.streamingMessage && (
               <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
             )}
 
@@ -936,9 +935,15 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
               />
             )}
 
-            {agentRunning && !hasStreamingContent && agentPhase && (
-              <div className="break-words py-2 text-[13px] text-text-muted">
-                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t)}</span>
+            {agentRunning && (
+              <div className="agent-response-status" role="status" aria-live="polite">
+                <span className="agent-response-status-dot" aria-hidden="true" />
+                <span>{(agentPhase && phaseLabel(agentPhase, t)) || t("chat.responding")}</span>
+                <span className="agent-response-status-dots" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </span>
               </div>
             )}
 

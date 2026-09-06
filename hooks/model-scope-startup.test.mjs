@@ -10,10 +10,32 @@ test("new-session startup sends only explicit browser overrides", () => {
     source.indexOf("const loadSlashCommands"),
   );
 
-  assert.match(ensureSource, /const selectedModel = newSessionModelOverrideRef\.current;/);
+  assert.match(ensureSource, /const requestedModel = newSessionModelOverrideRef\.current;/);
+  assert.match(ensureSource, /const selectedModel = requestedModel && modelList\.some/);
   assert.doesNotMatch(ensureSource, /newSessionModel \?\? newSessionDefaultModel/);
   assert.match(ensureSource, /const selectedThinkingLevel = thinkingLevelOverrideRef\.current;/);
   assert.doesNotMatch(ensureSource, /thinkingLevel !== "auto"/);
+});
+
+test("new-session startup discards an explicit model that is no longer available", () => {
+  const ensureSource = source.slice(
+    source.indexOf("const ensureNewSession"),
+    source.indexOf("const loadSlashCommands"),
+  );
+
+  assert.match(ensureSource, /model\.provider === requestedModel\.provider/);
+  assert.match(ensureSource, /model\.id === requestedModel\.modelId/);
+  assert.match(ensureSource, /newSessionModelOverrideRef\.current = null/);
+  assert.match(ensureSource, /setNewSessionModel\(null\)/);
+});
+
+test("new-session startup surfaces the API error body instead of only the HTTP status", () => {
+  const ensureSource = source.slice(
+    source.indexOf("const ensureNewSession"),
+    source.indexOf("const loadSlashCommands"),
+  );
+
+  assert.match(ensureSource, /result\.error \?\? `HTTP \$\{res\.status\}`/);
 });
 
 test("new-session startup adopts server state only while explicit overrides are unchanged", () => {
