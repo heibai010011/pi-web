@@ -6,10 +6,13 @@ const source = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8"
 
 function fileContentBlock() {
   const start = source.indexOf("{/* Only the active viewer");
-  const end = source.indexOf("</div>\n      </div>\n    </div>", start);
+  // Windows checkouts get CRLF; normalize so the closing-div probe is EOL-agnostic.
+  const normalized = source.replace(/\r\n/g, "\n");
+  const startNormalized = normalized.indexOf("{/* Only the active viewer");
+  const end = normalized.indexOf("</div>\n      </div>\n    </div>", startNormalized);
   assert.notEqual(start, -1, "file content comment not found");
   assert.notEqual(end, -1, "end of file content block not found");
-  return source.slice(start, end);
+  return normalized.slice(startNormalized, end);
 }
 
 test("only the active file tab mounts a FileViewer", () => {

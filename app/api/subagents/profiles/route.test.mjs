@@ -17,6 +17,14 @@ const jiti = createJiti(import.meta.url, {
 const { GET, PUT, PATCH, DELETE } = await jiti.import("./route.ts");
 const { allowFileRoot } = await jiti.import("../../../../lib/file-access.ts");
 
+// Under `--test-isolation=none` every test file in the run mutates the one
+// shared process.env at module init and hooks of other files run in between.
+// Point the agent dir at THIS file's temp dir inside each test body (the
+// only place whose timing is guaranteed) so the routes always write here.
+function useOwnAgentDir() {
+  process.env.PI_CODING_AGENT_DIR = testAgentDir;
+}
+
 after(async () => {
   if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
@@ -48,6 +56,7 @@ function jsonRequest(method, body) {
 }
 
 test("profiles route creates, lists, and deletes a project profile", async (t) => {
+  useOwnAgentDir();
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-"));
   allowFileRoot(cwd);
   t.after(() => rm(cwd, { recursive: true, force: true }));
@@ -82,6 +91,7 @@ test("profiles route creates, lists, and deletes a project profile", async (t) =
 });
 
 test("profiles route keeps same-name global and project profiles independently editable", async (t) => {
+  useOwnAgentDir();
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-"));
   allowFileRoot(cwd);
   t.after(() => rm(cwd, { recursive: true, force: true }));
@@ -138,6 +148,7 @@ test("profiles route keeps same-name global and project profiles independently e
 });
 
 test("profiles route rejects missing paths, malformed profiles, and unsafe names", async (t) => {
+  useOwnAgentDir();
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-"));
   allowFileRoot(cwd);
   t.after(() => rm(cwd, { recursive: true, force: true }));

@@ -149,9 +149,15 @@ export async function DELETE(
     const parentSessionPath = parentHeader?.parentSession;
     // The grandparent's id is needed to also fix pi-web:subagent metadata
     // entries, which record parentSessionId separately from the header.
-    const parentSessionId = parentSessionPath
-      ? readSessionHeader(parentSessionPath)?.id
-      : undefined;
+    let parentSessionId: string | undefined;
+    if (parentSessionPath) {
+      try {
+        // The parent may have been deleted or moved already; treat it as absent.
+        parentSessionId = readSessionHeader(parentSessionPath)?.id;
+      } catch {
+        parentSessionId = undefined;
+      }
+    }
 
     // Stop the live parent before mutating any child file. If shutdown fails,
     // the tree remains untouched instead of being left half-reparented.

@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { createRequire } from "node:module";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import reactSyntaxHighlighter from "react-syntax-highlighter";
 
 const source = await readFile(new URL("./FileViewer.tsx", import.meta.url), "utf8");
 const cssSource = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
-const { Prism: SyntaxHighlighter } = reactSyntaxHighlighter;
 
 function functionBlock(name, nextName) {
   const start = source.indexOf(`function ${name}(`);
@@ -19,7 +18,8 @@ function functionBlock(name, nextName) {
 
 for (const [name, nextName] of [
   ["ImageViewer", "formatDuration"],
-  ["AudioViewer", "DocumentViewer"],
+  ["AudioViewer", "VideoViewer"],
+  ["VideoViewer", "DocumentViewer"],
   ["DocumentViewer", "FileViewer"],
   ["TextFileViewer", null],
 ]) {
@@ -38,7 +38,7 @@ for (const [name, nextName] of [
 
 test("FileViewer forwards watcher state to every viewer implementation", () => {
   const block = functionBlock("FileViewer", "TextFileViewer");
-  assert.equal(block.match(/watchEnabled=\{watchEnabled\}/g)?.length, 4);
+  assert.equal(block.match(/watchEnabled=\{watchEnabled\}/g)?.length, 5);
 });
 
 test("TextFileViewer snapshots and restores lightweight tab state", () => {
@@ -59,7 +59,23 @@ test("TextFileViewer keeps first-mount preview eligibility across Strict Effects
   assert.match(block, /defaultPreviewEligibleRef\.current[\s\S]*updateDisplayMode\("preview"\)/);
 });
 
-test("markdown table tokens stay inline despite Tailwind's table utility", () => {
+// Rendering with react-syntax-highlighter needs that package loaded exactly
+// once. Under `--test-isolation=none` the shared realm already contains a
+// jiti-loaded copy from another test file, and a second load — ESM or
+// require — fails ("module is not linked" / "Cannot redefine property:
+// Light"). Detect that up front and skip; CI's per-process isolation loads
+// the package fresh and the render assertion still runs there.
+let highlighterAvailable = true;
+let highlighter;
+try {
+  const mod = createRequire(import.meta.url)("react-syntax-highlighter");
+  highlighter = mod.Prism ?? mod.default?.Prism;
+} catch {
+  highlighterAvailable = false;
+}
+
+test("markdown table tokens stay inline despite Tailwind's table utility", { skip: !highlighterAvailable && "react-syntax-highlighter already loaded by another test file in this realm" }, async () => {
+  const SyntaxHighlighter = highlighter;
   const html = renderToStaticMarkup(
     React.createElement(
       SyntaxHighlighter,

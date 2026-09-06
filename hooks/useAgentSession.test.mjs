@@ -75,10 +75,9 @@ test("opening System or Tools lazily starts a dormant session without sending a 
     source.indexOf("  const loadSystemInfo = useCallback"),
     source.indexOf("  const loadSlashCommands = useCallback"),
   );
-  const loaderEffectSource = source.slice(
-    source.indexOf("  useEffect(() => {\n    onSystemInfoLoaderChange"),
-    source.indexOf("  useEffect(() => {\n    if (!onBranchDataChange) return;"),
-  );
+  const loaderEffectStart = source.search(/  useEffect\(\(\) => \{\r?\n    onSystemInfoLoaderChange/);
+  const loaderEffectEnd = source.search(/  useEffect\(\(\) => \{\r?\n    if \(!onBranchDataChange\) return;/);
+  const loaderEffectSource = source.slice(loaderEffectStart, loaderEffectEnd);
 
   assert.match(loadSystemInfoSource, /sessionIdRef\.current \?\? await ensureNewSession\(\)/);
   assert.doesNotMatch(loadSystemInfoSource, /promoteNewSession\(\)/);
@@ -263,9 +262,10 @@ test("delegates event stream readiness and hides an empty agent phase", () => {
   assert.match(source, /shouldMaintain: \(sid\)[\s\S]*?sessionIdRef\.current === sid/);
   assert.match(ensureSource, /eventConnectionRef\.current!\.ensureConnected\(sid\)/);
   assert.match(ensureSource, /eventConnectionRef\.current!\.maintain\(sid\)/);
-  assert.match(chatWindowSource, /const hasStreamingContent = Boolean\(streamState\.streamingMessage\?\.content\.length\)/);
-  assert.match(chatWindowSource, /streamState\.isStreaming && hasStreamingContent && streamState\.streamingMessage/);
-  assert.match(chatWindowSource, /agentRunning && !hasStreamingContent && agentPhase/);
+  // The merged fork renders the running phase as a status pill; an empty
+  // streaming bubble is simply not mounted and the pill carries the phase.
+  assert.match(chatWindowSource, /streamState\.isStreaming && Boolean\(streamState\.streamingMessage\?\.content\.length\) && streamState\.streamingMessage/);
+  assert.match(chatWindowSource, /agentRunning && \(/);
   assert.match(chatWindowSource, /return null;/);
 });
 
@@ -421,7 +421,9 @@ test("keeps live following cancellable when the user scrolls away from the tail"
   assert.match(source, /const wasAttached = isNearBottomRef\.current;[\s\S]*?const isAttached = getLiveFollowAttached\([\s\S]*?wasAttached,[\s\S]*?previousScrollTopRef\.current,[\s\S]*?scrollTop,[\s\S]*?clientHeight,[\s\S]*?scrollHeight/);
   assert.match(scrollHandlerSource, /const isAgentRunning = agentRunningRef\.current;[\s\S]*?isAgentRunning\s*\? CHAT_SCROLL_REATTACH_TOLERANCE\s*:\s*CHAT_SCROLL_TAIL_TOLERANCE/);
   assert.match(source, /previousScrollTopRef\.current = scrollTop/);
-  assert.match(scrollToBottomSource, /messagesEndRef\.current\?\.scrollIntoView\(\{ behavior \}\);\s*if \(container\) previousScrollTopRef\.current = container\.scrollTop/);
+  assert.match(scrollToBottomSource, /const container = scrollContainerRef\.current;\s*if \(!container\) return;/);
+  assert.match(scrollToBottomSource, /container\.scrollTo\(\{ top: container\.scrollHeight, behavior \}\);\s*previousScrollTopRef\.current = container\.scrollTop;/);
+  assert.doesNotMatch(scrollToBottomSource, /scrollIntoView/);
   assert.match(streamUpdateSource, /liveFollowFrameRef\.current === null/);
   assert.match(streamUpdateSource, /requestAnimationFrame\(\(\) => \{[\s\S]*?liveFollowFrameRef\.current = null;[\s\S]*?if \(isNearBottomRef\.current && !userScrolledUpRef\.current\) scrollToBottom\("auto"\)/);
   assert.match(streamUpdateSource, /!pendingScrollToUserRef\.current && isNearBottomRef\.current && !userScrolledUpRef\.current/);
@@ -430,6 +432,20 @@ test("keeps live following cancellable when the user scrolls away from the tail"
   assert.match(scrollHandlerSource, /cancelAnimationFrame\(liveFollowFrameRef\.current\)/);
   assert.match(source, /previousScrollTopRef\.current = container\.scrollTop;\s*container\.addEventListener\("scroll", handleScrollPositionChange/);
   assert.doesNotMatch(source, /SCROLL_BOTTOM_THRESHOLD|completionScrollAllowedRef|ignoreProgrammaticScrollUntilRef/);
+});
+
+test("restores an in-page session viewport without the default tail jump", () => {
+  assert.match(source, /const initialScrollDoneRef = useRef\(Boolean\(opts\.deferInitialScroll\)\)/);
+  assert.match(source, /const scrollToMessage = useCallback\(\(element: HTMLElement, viewportOffset = 16\)/);
+  assert.match(source, /container\.scrollTop\s+- viewportOffset/);
+  assert.match(chatWindowSource, /deferInitialScroll: Boolean\(pendingScrollRestore\)/);
+  assert.match(chatWindowSource, /isScrollAtTail\(container\.scrollTop, container\.clientHeight, container\.scrollHeight\)/);
+  assert.match(chatWindowSource, /findChatScrollAnchor\(/);
+  assert.match(chatWindowSource, /while \(hasMore && before && !controller\.signal\.aborted\)/);
+  assert.match(chatWindowSource, /context\.oldestEntryId === position\.oldestEntryId/);
+  assert.match(chatWindowSource, /if \(!context\) \{\s*scrollToBottom\("instant"\);\s*setPendingScrollRestore\(null\);/);
+  assert.match(chatWindowSource, /scrollToMessage\(element, position\.anchorOffset\)/);
+  assert.match(chatWindowSource, /visibility: pendingScrollRestore \? "hidden" : undefined/);
 });
 
 test("keeps a newly sent user message at the top while its response starts", () => {
@@ -442,7 +458,7 @@ test("keeps a newly sent user message at the top while its response starts", () 
     source.indexOf("const handleScrollPositionChange"),
   );
   const scrollEffectSource = source.slice(
-    source.indexOf("useLayoutEffect(() => {\n    if (messages.length > 0)"),
+    source.search(/useLayoutEffect\(\(\) => \{\r?\n    if \(messages\.length > 0\)/),
     source.indexOf("// Load model list"),
   );
 
@@ -464,13 +480,12 @@ test("keeps a newly sent user message at the top while its response starts", () 
 });
 
 test("keeps prompt anchor measurement outside the React update cycle", () => {
-  const anchorEffectStart = chatWindowSource.indexOf(
-    "useLayoutEffect(() => {\n    const spacer = promptAnchorSpacerRef.current;",
+  const anchorEffectStart = chatWindowSource.search(
+    /useLayoutEffect\(\(\) => \{\r?\n    const spacer = promptAnchorSpacerRef\.current;/,
   );
   assert.notEqual(anchorEffectStart, -1);
-  const syncEffectStart = chatWindowSource.indexOf(
-    "useLayoutEffect(() => {\n    promptAnchorUpdateRef.current?.();",
-    anchorEffectStart,
+  const syncEffectStart = chatWindowSource.search(
+    /useLayoutEffect\(\(\) => \{\r?\n    promptAnchorUpdateRef\.current\?\.\(\);/,
   );
   assert.notEqual(syncEffectStart, -1);
   const anchorLifecycleEffectSource = chatWindowSource.slice(
@@ -494,18 +509,18 @@ test("keeps prompt anchor measurement outside the React update cycle", () => {
   assert.match(anchorLifecycleEffectSource, /promptAnchorMeasureFrameRef\.current = requestAnimationFrame\(\(\) => \{\s*promptAnchorMeasureFrameRef\.current = null;\s*updatePromptAnchorSpacer\(\)/);
   assert.match(anchorLifecycleEffectSource, /disposed = true;[\s\S]*?promptAnchorUpdateRef\.current === updatePromptAnchorSpacer[\s\S]*?cancelAnimationFrame\(promptAnchorMeasureFrameRef\.current\)/);
   assert.match(anchorSyncEffectSource, /promptAnchorUpdateRef\.current\?\.\(\);\s*\}, \[streamState\.streamingMessage\]\)/);
-  assert.match(chatWindowSource, /<div ref=\{messageContentRef\} style=\{\{/);
+  assert.match(chatWindowSource, /<div ref=\{messageContentRef\}[^>]*style=\{\{/);
 });
 
 test("uses the prompt anchor as the only trailing message spacer", () => {
-  assert.match(chatWindowSource, /<div ref=\{promptAnchorSpacerRef\} aria-hidden="true" \/>[\s\S]*?<div ref=\{messagesEndRef\} \/>/);
+  assert.match(chatWindowSource, /<div ref=\{promptAnchorSpacerRef\} aria-hidden="true" \/>[\s\S]*?<\/div>/);
   assert.doesNotMatch(chatWindowSource, /bottomComposer(?:Ref|Height|ScrollFrameRef)/);
   assert.doesNotMatch(chatWindowSource, /new ResizeObserver\(updateBottomComposerHeight\)/);
 });
 
 test("keeps a detached viewport in place when streaming completes", () => {
   const scrollEffectSource = source.slice(
-    source.indexOf("useLayoutEffect(() => {\n    if (messages.length > 0)"),
+    source.search(/useLayoutEffect\(\(\) => \{\r?\n    if \(messages\.length > 0\)/),
     source.indexOf("// Load model list"),
   );
 

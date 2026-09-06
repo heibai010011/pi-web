@@ -9,9 +9,10 @@ test("renders temporary notices once at the top right of the chat column", () =>
   const noticeShelfUsages = source.match(/<NoticeShelf notices=\{notices\}/g) ?? [];
 
   assert.equal(noticeShelfUsages.length, 1);
+  // The folded fork keeps the minimap clearance constant under a distinct name.
   assert.match(
     source,
-    /position: "absolute",\s*top: 12,\s*left: 0,\s*right: isMobile \? 0 : CHAT_MINIMAP_WIDTH,[\s\S]*?justifyContent: "flex-end",[\s\S]*?<NoticeShelf notices=\{notices\} floating onPauseChange=\{setNoticePaused\} \/>/,
+    /position: "absolute",\s*top: 12,\s*left: 0,\s*right: isMobile \? 0 : CHAT_MINIMAP_WIDTH_RESOLVED,[\s\S]*?justifyContent: "flex-end",[\s\S]*?<NoticeShelf notices=\{notices\} floating onPauseChange=\{setNoticePaused\} \/>/,
   );
 });
 

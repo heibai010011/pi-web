@@ -16,6 +16,14 @@ const jiti = createJiti(import.meta.url, {
 });
 const { GET, PUT } = await jiti.import("./route.ts");
 
+// Under `--test-isolation=none` every test file in the run mutates the one
+// shared process.env at module init and hooks of other files run in between.
+// Point the agent dir at THIS file's temp dir inside each test body (the
+// only place whose timing is guaranteed) so the route always writes here.
+function useOwnAgentDir() {
+  process.env.PI_CODING_AGENT_DIR = testAgentDir;
+}
+
 after(async () => {
   if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
@@ -31,6 +39,7 @@ function request(body, contentType = "application/json") {
 }
 
 test("settings route defaults off and persists both switch states", async () => {
+  useOwnAgentDir();
   let response = await GET();
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { enabled: false });
@@ -48,6 +57,7 @@ test("settings route defaults off and persists both switch states", async () => 
 });
 
 test("settings route validates mutations", async () => {
+  useOwnAgentDir();
   let response = await PUT(request({ enabled: "yes" }));
   assert.equal(response.status, 400);
   assert.deepEqual(await response.json(), { error: "enabled must be a boolean" });
