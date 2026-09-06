@@ -174,7 +174,9 @@ try {
   assert.equal(compacted.context.messages.some((entry) => entry.role === "user"), false);
   console.log("PASS: bounded history, branch context, pagination root, and API errors");
 
-  browser = await chromium.launch();
+  // E2E_CHROME_PATH overrides the downloaded Chromium (e.g. system Chrome) so
+  // the suite can run without `npx playwright install chromium`.
+  browser = await chromium.launch(process.env.E2E_CHROME_PATH ? { executablePath: process.env.E2E_CHROME_PATH } : {});
   for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
     context = await browser.newContext({ viewport, locale: "en-US" });
     await context.tracing.start({ screenshots: true, snapshots: true });
@@ -292,7 +294,19 @@ try {
       });
       await page.screenshot({ path: join(artifacts, "compaction-minimap.png") });
 
+      // This fork's sidebar groups sessions into collapsible time sections
+      // ("Active", "Last 30 days", ...) and collapses older sections by
+      // default. Expand every collapsed section before resolving a row so a
+      // session hidden behind a fold is still clickable.
+      const expandSidebarSections = async () => {
+        for (const handle of await page.locator('[title^="Expand "]').all()) {
+          if (await handle.isVisible().catch(() => false)) {
+            await handle.click().catch(() => {});
+          }
+        }
+      };
       const selectSession = async (title, entryId) => {
+        await expandSidebarSections();
         await page.locator(`[title="${title}"]`).click();
         await page.locator(`[data-entry-id="${entryId}"]:not([data-message-role])`).waitFor({ state: "visible" });
       };
