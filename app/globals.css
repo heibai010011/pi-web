@@ -1311,67 +1311,6 @@ span.token.table {
   50% { opacity: 0.5; }
 }
 
-.agent-response-status {
-  display: flex;
-  align-items: center;
-  width: fit-content;
-  min-height: 28px;
-  margin: 2px 0 10px;
-  padding: 5px 9px;
-  gap: 7px;
-  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 7%, var(--bg-panel));
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1;
-}
-
-.agent-response-status-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent);
-  animation: agent-response-ring 1.6s ease-out infinite;
-}
-
-.agent-response-status-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  min-width: 21px;
-}
-
-.agent-response-status-dots > span {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: currentColor;
-  animation: agent-response-bounce 1.2s ease-in-out infinite;
-}
-
-.agent-response-status-dots > span:nth-child(2) { animation-delay: 0.15s; }
-.agent-response-status-dots > span:nth-child(3) { animation-delay: 0.3s; }
-
-@keyframes agent-response-ring {
-  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
-  70%, 100% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 0%, transparent); }
-}
-
-@keyframes agent-response-bounce {
-  0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
-  30% { transform: translateY(-2px); opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .agent-response-status-dot,
-  .agent-response-status-dots > span {
-    animation: none;
-  }
-}
-
 /* Inline permission request — intentionally follows the chat's flat DSH-style
    cards rather than interrupting the workspace with a modal overlay. */
 .permission-request-card {

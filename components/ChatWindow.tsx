@@ -1213,15 +1213,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               />
             )}
 
-            {agentRunning && (
-              <div className="agent-response-status" role="status" aria-live="polite">
-                <span className="agent-response-status-dot" aria-hidden="true" />
-                <span>{(agentPhase && phaseLabel(agentPhase, t)) || t("chat.responding")}</span>
-                <span className="agent-response-status-dots" aria-hidden="true">
-                  <span />
-                  <span />
-                  <span />
-                </span>
+            {agentRunning && !streamState.streamingMessage?.content.length && agentPhase && (
+              <div className="break-words py-2 text-[13px] text-text-muted" role="status" aria-live="polite">
+                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t)}</span>
               </div>
             )}
 

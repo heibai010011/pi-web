@@ -262,10 +262,10 @@ test("delegates event stream readiness and hides an empty agent phase", () => {
   assert.match(source, /shouldMaintain: \(sid\)[\s\S]*?sessionIdRef\.current === sid/);
   assert.match(ensureSource, /eventConnectionRef\.current!\.ensureConnected\(sid\)/);
   assert.match(ensureSource, /eventConnectionRef\.current!\.maintain\(sid\)/);
-  // The merged fork renders the running phase as a status pill; an empty
-  // streaming bubble is simply not mounted and the pill carries the phase.
+  // Matches upstream: the streaming bubble mounts only with content, and the
+  // running phase renders as a pulsing muted label when nothing streams yet.
   assert.match(chatWindowSource, /streamState\.isStreaming && Boolean\(streamState\.streamingMessage\?\.content\.length\) && streamState\.streamingMessage/);
-  assert.match(chatWindowSource, /agentRunning && \(/);
+  assert.match(chatWindowSource, /agentRunning && !streamState\.streamingMessage\?\.content\.length && agentPhase && \(/);
   assert.match(chatWindowSource, /return null;/);
 });
 
