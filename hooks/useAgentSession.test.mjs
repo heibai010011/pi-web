@@ -528,3 +528,84 @@ test("keeps a detached viewport in place when streaming completes", () => {
   assert.doesNotMatch(scrollEffectSource, /\|\|/);
   assert.match(source, /addEventListener\("scroll", handleScrollPositionChange/);
 });
+
+test("stale session reloads cannot overwrite a newer snapshot or loaded pages", () => {
+  const loadSessionSource = source.slice(
+    source.indexOf("const loadSession = useCallback"),
+    source.indexOf("const loadContext = useCallback"),
+  );
+  const loadContextSource = source.slice(
+    source.indexOf("const loadContext = useCallback"),
+    source.indexOf("const loadTools = useCallback"),
+  );
+
+  // Shared monotonic ticket: whichever reload started last wins.
+  assert.match(source, /const reloadSeqRef = useRef\(0\)/);
+  assert.match(loadSessionSource, /const seq = \+\+reloadSeqRef\.current/);
+  assert.match(
+    loadSessionSource,
+    /if \(sessionIdRef\.current !== sid \|\| reloadSeqRef\.current !== seq\) return null;/,
+  );
+  // The includeState sub-request is guarded after its own await too.
+  assert.match(loadSessionSource, /stateRes[\s\S]*?reloadSeqRef\.current !== seq\) return null;/);
+  assert.match(loadContextSource, /const seq = \+\+reloadSeqRef\.current/);
+  assert.match(loadContextSource, /if \(reloadSeqRef\.current !== seq\) return;/);
+  // The reloaded tail splices onto already-loaded older pages instead of
+  // resetting pagination; merge behavior is covered by lib/session-reload.test.mjs.
+  assert.match(source, /import \{ mergeTailSnapshot, tailAnchorIndex \} from "@\/lib\/session-reload";/);
+  assert.match(loadSessionSource, /const merged = mergeTailSnapshot\(prevEntryIds, prev, prevCursor, prevHasMore, \{/);
+});
+
+test("an optimistic submission survives a background reload until message_end", () => {
+  const loadSessionSource = source.slice(
+    source.indexOf("const loadSession = useCallback"),
+    source.indexOf("const loadContext = useCallback"),
+  );
+  const sendSource = source.slice(
+    source.indexOf("  const handleSend = useCallback"),
+    source.indexOf("  const executeBash = useCallback"),
+  );
+  const messageEndSource = source.slice(
+    source.indexOf('case "message_end"'),
+    source.indexOf('case "tool_execution_start"'),
+  );
+  const promptDoneSource = source.slice(
+    source.indexOf('case "prompt_done"'),
+    source.indexOf('case "prompt_error"'),
+  );
+  const finishSource = source.slice(
+    source.indexOf("const finishPromptWithoutStream"),
+    source.indexOf("const waitForPromptSettlement"),
+  );
+
+  assert.match(source, /const optimisticUserMessageRef = useRef<AgentMessage \| null>\(null\)/);
+  // handleSend stores the message object next to its key.
+  assert.match(
+    sendSource,
+    /optimisticUserMessageKeyRef\.current = userMessageKey\(userMsg\);\s*optimisticUserMessageRef\.current = userMsg;/,
+  );
+  // A reload re-appends it only when the merged tail does not end with the
+  // delivered copy of the same message.
+  assert.match(loadSessionSource, /if \(optimistic && optimisticKey\) \{/);
+  assert.match(
+    loadSessionSource,
+    /if \(!last \|\| last\.role !== "user" \|\| userMessageKey\(last\) !== optimisticKey\) \{\s*return \[\.\.\.merged\.messages, optimistic\];/,
+  );
+  // Cleared wherever the key ref is cleared.
+  assert.match(
+    messageEndSource,
+    /optimisticUserMessageKeyRef\.current = null;\s*optimisticUserMessageRef\.current = null;/,
+  );
+  assert.match(
+    promptDoneSource,
+    /optimisticUserMessageKeyRef\.current = null;\s*optimisticUserMessageRef\.current = null;/,
+  );
+  assert.match(
+    finishSource,
+    /optimisticUserMessageKeyRef\.current = null;\s*optimisticUserMessageRef\.current = null;/,
+  );
+  assert.match(
+    sendSource,
+    /restoreSubmission\(message, images, composerDraftKey\);\s*optimisticUserMessageKeyRef\.current = null;\s*optimisticUserMessageRef\.current = null;/,
+  );
+});
