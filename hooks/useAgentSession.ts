@@ -1102,13 +1102,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
       case "connected": {
-        dispatch({ type: "end" });
+        // The server replays a message_start snapshot only while it still holds
+        // a streamingMessage; reconnecting mid-run during a tool phase has no
+        // snapshot to restore, so ending here would permanently drop the live
+        // streaming bubble.
         if (event.isStreaming === true) {
           cancelEventStreamGrace();
           sdkAgentActiveRef.current = true;
           agentRunningRef.current = true;
           setAgentRunning(true);
           setAgentPhase({ kind: "waiting_model" });
+        } else {
+          dispatch({ type: "end" });
         }
         break;
       }
