@@ -19,6 +19,7 @@ import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-prese
 import { getPresetFromToolNames, getToolNamesForPreset, type ToolEntry, type ToolPreset } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { mergeSessionStats, type SessionFileStats } from "@/lib/session-stats";
+import { mergeTailSnapshot, tailAnchorIndex } from "@/lib/session-reload";
 import { userMessageKey } from "@/lib/prompt-recovery";
 import { claimSessionFolderDraft, promoteSessionFolderDraft } from "@/lib/session-folder-drafts";
 import { AgentEventConnection } from "@/lib/agent-event-connection";
@@ -361,6 +362,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const thinkingLevelOverrideRef = useRef<Exclude<ThinkingLevelOption, "auto"> | null>(null);
   const promptRunIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
+  // The optimistic message object itself, so a background reload that does not
+  // yet contain the pending submission can re-append it (the key ref alone
+  // cannot restore the bubble).
+  const optimisticUserMessageRef = useRef<AgentMessage | null>(null);
+  // Monotonic ticket shared by loadSession/loadContext: the reload that started
+  // last wins; a slower earlier response is discarded once it resolves.
+  const reloadSeqRef = useRef(0);
+  // Mirrors of the pagination states, readable synchronously while merging a
+  // reloaded tail snapshot inside a setMessages functional update.
+  const entryIdsRef = useRef<string[]>([]);
+  const historyCursorRef = useRef<string | null>(null);
+  const hasEarlierMessagesRef = useRef(false);
   const modelSwitchPendingRef = useRef(false);
   const draftKeyAliasesRef = useRef(new Map<string, string>());
   const sessionHookMountedRef = useRef(true);
@@ -482,6 +495,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
     let messagesLoaded = false;
+    // Reload timing barrier shared with loadContext. Many paths call loadSession
+    // concurrently (agent_end, prompt_done, agent_settled, compaction_end, slash
+    // commands, model switches); a slower earlier response must not overwrite a
+    // newer snapshot with stale messages.
+    const seq = ++reloadSeqRef.current;
     try {
       if (showLoading) setLoading(true);
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
@@ -494,20 +512,61 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setEntryIds([]);
           setHistoryCursor(null);
           setHasEarlierMessages(false);
+          entryIdsRef.current = [];
+          historyCursorRef.current = null;
+          hasEarlierMessagesRef.current = false;
           setError(null);
         }
         return null;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as SessionData;
-      if (sessionIdRef.current !== sid) return null;
+      if (sessionIdRef.current !== sid || reloadSeqRef.current !== seq) return null;
       const persistedMessages = d.context.messages;
       setData(d);
       setActiveLeafId(d.leafId);
-      setMessages(persistedMessages);
-      setEntryIds(d.context.entryIds ?? []);
-      setHistoryCursor(d.context.oldestEntryId);
-      setHasEarlierMessages(d.context.hasMore);
+      // The server always answers with the most-recent `tail` window. Splice it
+      // onto any earlier pages the user already paged in (a background reload
+      // must not drop loaded history), and keep an optimistic user message
+      // visible until its message_end consumes it.
+      const prevEntryIds = entryIdsRef.current;
+      const prevCursor = historyCursorRef.current;
+      const prevHasMore = hasEarlierMessagesRef.current;
+      const optimistic = optimisticUserMessageRef.current;
+      const optimisticKey = optimisticUserMessageKeyRef.current;
+      const incomingEntryIds = d.context.entryIds ?? [];
+      const anchor = tailAnchorIndex(prevEntryIds, d.context.oldestEntryId);
+      const retainedPrefix = anchor > 0;
+      const nextEntryIds = retainedPrefix
+        ? [...prevEntryIds.slice(0, anchor), ...incomingEntryIds]
+        : incomingEntryIds;
+      const nextCursor = retainedPrefix ? prevCursor : d.context.oldestEntryId;
+      const nextHasMore = retainedPrefix ? (prevHasMore || d.context.hasMore) : d.context.hasMore;
+      setMessages((prev) => {
+        const merged = mergeTailSnapshot(prevEntryIds, prev, prevCursor, prevHasMore, {
+          messages: persistedMessages,
+          entryIds: incomingEntryIds,
+          oldestEntryId: d.context.oldestEntryId,
+          hasMore: d.context.hasMore,
+        });
+        // A just-sent optimistic message is not in the server snapshot yet
+        // (delivery or persistence lag); re-append it so the reload cannot
+        // wipe the pending submission. When the snapshot's last message is the
+        // delivered copy, the key matches and no duplicate is added.
+        if (optimistic && optimisticKey) {
+          const last = merged.messages[merged.messages.length - 1];
+          if (!last || last.role !== "user" || userMessageKey(last) !== optimisticKey) {
+            return [...merged.messages, optimistic];
+          }
+        }
+        return merged.messages;
+      });
+      setEntryIds(nextEntryIds);
+      setHistoryCursor(nextCursor);
+      setHasEarlierMessages(nextHasMore);
+      entryIdsRef.current = nextEntryIds;
+      historyCursorRef.current = nextCursor;
+      hasEarlierMessagesRef.current = nextHasMore;
       setToolPresetState(d.toolNames !== undefined ? getPresetFromToolNames(d.toolNames) : "default");
       setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
       setError(null);
@@ -523,7 +582,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
         const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
-        if (sessionIdRef.current !== sid) return null;
+        if (sessionIdRef.current !== sid || reloadSeqRef.current !== seq) return null;
 
         const liveState = agentState.state;
         if (liveState) {
@@ -550,6 +609,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [setToolPresetState]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null, before?: string | null, options?: { tail?: number; signal?: AbortSignal }) => {
+    // Shares the reload sequence with loadSession so the two act as one timing
+    // barrier: a reload that started later discards this response when it
+    // resolves late, and vice versa.
+    const seq = ++reloadSeqRef.current;
     try {
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
       if (leafId) params.set("leafId", leafId);
@@ -562,8 +625,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as { context: SessionData["context"] };
       if (sessionIdRef.current !== sid || options?.signal?.aborted || !sessionHookMountedRef.current) return;
+      if (reloadSeqRef.current !== seq) return;
       setHistoryCursor(d.context.oldestEntryId);
       setHasEarlierMessages(d.context.hasMore);
+      historyCursorRef.current = d.context.oldestEntryId;
+      hasEarlierMessagesRef.current = d.context.hasMore;
       setData((prev) => {
         if (!prev || prev.sessionId !== sid) return prev;
         const context = before ? {
@@ -579,9 +645,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Older page: prepend so scroll position stays anchored.
         setMessages((prev) => [...d.context.messages, ...prev]);
         setEntryIds((prev) => [...d.context.entryIds, ...prev]);
+        entryIdsRef.current = [...d.context.entryIds ?? [], ...entryIdsRef.current];
       } else {
         setMessages(d.context.messages);
         setEntryIds(d.context.entryIds ?? []);
+        entryIdsRef.current = d.context.entryIds ?? [];
       }
       return d.context;
     } catch (e) {
@@ -968,6 +1036,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       rpcPromptPendingRef.current = false;
       sdkAgentActiveRef.current = false;
       optimisticUserMessageKeyRef.current = null;
+      optimisticUserMessageRef.current = null;
       const wasRunning = settleUiStage();
       if (promptWasPending) {
         notifyPromptStage(runId);
@@ -1165,6 +1234,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const promptWasPending = rpcPromptPendingRef.current;
           rpcPromptPendingRef.current = false;
           optimisticUserMessageKeyRef.current = null;
+          optimisticUserMessageRef.current = null;
           const firstNotification = notifyPromptStage(runId);
           if (!promptWasPending && !firstNotification) break;
 
@@ -1246,6 +1316,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const deliveredKey = userMessageKey(delivered);
           const optimisticKey = optimisticUserMessageKeyRef.current;
           optimisticUserMessageKeyRef.current = null;
+          optimisticUserMessageRef.current = null;
           setMessages((prev) => {
             const last = prev[prev.length - 1];
             if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
@@ -1375,6 +1446,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     setMessages((prev) => [...prev, userMsg]);
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
+    optimisticUserMessageRef.current = userMsg;
     promptRunIdRef.current = promptRunId;
     agentRunningRef.current = true;
     setAgentRunning(true);
@@ -1445,6 +1517,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       restoreSubmission(message, images, composerDraftKey);
       optimisticUserMessageKeyRef.current = null;
+      optimisticUserMessageRef.current = null;
       // Rejection only describes this submission. Another tab or an event we
       // missed may still have a real run active for the same session, so keep
       // its SSE connection until server state says the wrapper is idle.

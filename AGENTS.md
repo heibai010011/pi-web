@@ -165,6 +165,11 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - While a run is active, `useAgentSession` periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed terminal events from background tabs or half-open connections.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
 
+### Session reload timing and tail merge
+- `loadSession`/`loadContext` in `useAgentSession` share a monotonic `reloadSeqRef` ticket: whichever request started last wins, and a slower earlier response is discarded after it resolves. Without this, a large-context reload that returns late (agent_end, prompt_done, compaction_end all fire loadSession) overwrote the newest turn with an old tail snapshot.
+- A reloaded tail window is merged (`mergeTailSnapshot` in `lib/session-reload.ts`) with pages the user already scrolled up to load; only a non-overlapping snapshot (fresh load, branch switch, compaction rewrite, or a window starting at the oldest loaded entry) resets the pagination cursor.
+- An optimistic user message that the server snapshot does not contain yet is re-appended after a reload (unless the snapshot's last message is the delivered copy) and stays until its `message_end` consumes it.
+
 ### Worktrees and project grouping
 - `lib/worktree.ts` resolves linked worktree top-levels back to the main repo `projectRoot`; `listAllSessions()` attaches that to each `SessionInfo` so all worktrees for one repo are grouped together in the sidebar.
 - Worktree operations are served by `/api/worktrees` and guarded by the same allowed-root rules as `/api/files`.
