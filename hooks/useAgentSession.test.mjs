@@ -334,6 +334,28 @@ test("keeps one reducer-owned assistant partial and consumes Pi JSON deltas", ()
   assert.doesNotMatch(messageEndSource, /streamState\.streamingMessage/);
 });
 
+test("keeps the streaming bubble alive when the event stream reconnects mid-run", () => {
+  const connectedSource = source.slice(
+    source.indexOf('case "connected"'),
+    source.indexOf('case "agent_start"'),
+  );
+
+  // The end dispatch must live in the non-streaming else branch of the
+  // isStreaming guard: the server replays a message_start snapshot only when
+  // it holds a streamingMessage, so a tool-phase reconnect has no snapshot
+  // that could rebuild a bubble ended here.
+  const streamingGuard = connectedSource.indexOf("event.isStreaming === true");
+  const endDispatch = connectedSource.indexOf('dispatch({ type: "end" })');
+  assert.ok(streamingGuard !== -1);
+  assert.ok(endDispatch !== -1);
+  assert.ok(endDispatch > streamingGuard);
+  assert.match(connectedSource, /\} else \{[\s\S]*?dispatch\(\{ type: "end" \}\);/);
+  assert.doesNotMatch(
+    connectedSource,
+    /dispatch\(\{ type: "end" \}\);\s*if \(event\.isStreaming === true\)/,
+  );
+});
+
 test("shows the latest streamed tool execution progress in the running phase", () => {
   const updateSource = source.slice(
     source.indexOf('case "tool_execution_update"'),
