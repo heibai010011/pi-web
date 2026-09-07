@@ -529,6 +529,7 @@ test("keeps a detached viewport in place when streaming completes", () => {
   assert.match(source, /addEventListener\("scroll", handleScrollPositionChange/);
 });
 
+
 test("stale session reloads cannot overwrite a newer snapshot or loaded pages", () => {
   const loadSessionSource = source.slice(
     source.indexOf("const loadSession = useCallback"),
@@ -608,4 +609,25 @@ test("an optimistic submission survives a background reload until message_end", 
     sendSource,
     /restoreSubmission\(message, images, composerDraftKey\);\s*optimisticUserMessageKeyRef\.current = null;\s*optimisticUserMessageRef\.current = null;/,
   );
+});
+
+
+test("manual compaction reloads without unmounting the chat scroller", () => {
+  const handleCompactSource = source.slice(
+    source.indexOf("  const handleCompact = useCallback"),
+    source.indexOf("  const loadModels = useCallback"),
+  );
+  const slashCompactSource = source.slice(
+    source.indexOf('case "compact"'),
+    source.indexOf('case "reload"'),
+  );
+
+  assert.match(handleCompactSource, /loadSession\(sid, false\)/);
+  assert.doesNotMatch(handleCompactSource, /loadSession\(sid, true\)/);
+  assert.match(slashCompactSource, /loadSession\(sid, false\)/);
+  assert.doesNotMatch(slashCompactSource, /loadSession\(sid, true\)/);
+  // The loading spinner may only replace the chat area on first mount, where
+  // there is no reading position to preserve.
+  assert.doesNotMatch(source, /loadSession\(sid, true\b/);
+  assert.match(source, /loadSession\(session\.id, true, true\)/);
 });
