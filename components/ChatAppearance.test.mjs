@@ -14,9 +14,8 @@ const { clampChatContentWidth, clampChatContentFontSize } = await jiti.import(".
 const widthVariable = /var\(--chat-content-max-width, 820px\)/g;
 
 test("chat content keeps the existing 820px default behind one shared variable", () => {
-  // The folded fork layout keeps a third reference for the inline new-session
-  // composer column; every reference must use the same shared variable.
-  assert.equal((chatWindow.match(widthVariable) ?? []).length, 3);
+  // The message column and the single shared composer must use the same variable.
+  assert.equal((chatWindow.match(widthVariable) ?? []).length, 2);
   assert.equal((chatInput.match(widthVariable) ?? []).length, 1);
   assert.match(globals, /--chat-content-max-width: 820px;/);
   assert.doesNotMatch(chatWindow, /max-w-\[820px\]|maxWidth: 820(?![0-9])/);

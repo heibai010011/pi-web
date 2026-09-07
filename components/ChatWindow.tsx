@@ -990,41 +990,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         {extensionCustomUi && (
           <ExtensionCustomPanel key={extensionCustomUi.id} request={extensionCustomUi} onInput={sendExtensionCustomInput} />
         )}
-        {isEmptyNew ? (
-        <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
-          <div className="w-full" style={{ maxWidth: "var(--chat-content-max-width, 820px)" }}>
-            <div
-              className="mb-3"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 12,
-                marginLeft: 16,
-                marginRight: isMobile ? 16 : 52,
-                fontFamily: "var(--font-mono)",
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "baseline", gap: isMobile ? 7 : 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
-                <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: 0, color: "var(--text)", flexShrink: 0, whiteSpace: "nowrap" }}>π</span>
-                <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: 0, flexShrink: 0, whiteSpace: "nowrap" }}>Pi Web</span>
-                <NewSessionUpdateLink label={(version) => t("appUpdate.releaseNotes", { version })} />
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  web <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
-                </span>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  pi <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}</span>
-                </span>
-              </div>
-            </div>
-            {chatInputElement}
-            <ExtensionStatusBar statuses={extensionStatuses} widgets={extensionWidgets} onOpenFile={onOpenFile} />
-          </div>
-        </div>
-        ) : (
-        <>
+        {!isEmptyNew && <>
         <div
           ref={scrollContainerRef}
           className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]"
@@ -1291,8 +1257,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             onRevealHistory={revealHistoryForMinimap}
           />
         )}
-        </>
-      )}
+        </>}
       </div>
 
       {quoteSelectionEnabled && quotedSelection && createPortal(

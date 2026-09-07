@@ -191,6 +191,20 @@ try {
       const url = new URL(response.url());
       if (url.pathname === `/api/sessions/${LONG}/context` && url.searchParams.has("before")) olderResponses.push(response);
     });
+
+    // A fresh chat used to render both the centered welcome composer and the
+    // shared bottom composer. Keep this scoped to the chat panel because the
+    // selected-text dialog can legitimately portal a compact composer to body.
+    await page.goto(`${base}/?cwd=${encodeURIComponent(project)}`, { waitUntil: "domcontentloaded" });
+    const freshChatPanel = page.locator(".chat-content:visible");
+    await freshChatPanel.waitFor();
+    assert.equal(await freshChatPanel.count(), 1, "Exactly one chat panel should be visible");
+    assert.equal(
+      await freshChatPanel.locator(".chat-input-textarea:visible").count(),
+      1,
+      "A fresh chat panel must expose exactly one visible primary message input",
+    );
+
     const stateReady = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/sessions/${LONG}/state`);
     await page.goto(`${base}/?session=${LONG}`, { waitUntil: "domcontentloaded" });
     assert.equal((await stateReady).status(), 200);

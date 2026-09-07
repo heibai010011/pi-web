@@ -28,6 +28,12 @@ test("ChatWindow no longer forwards streamStatus", () => {
   assert.doesNotMatch(source.chatWindow, /streamStatus/);
 });
 
+test("ChatWindow has one shared main composer render site", () => {
+  const mainComposerRenders = source.chatWindow.match(/\{chatInputElement\}/g) ?? [];
+  assert.equal(mainComposerRenders.length, 1);
+  assert.match(source.chatWindow, /\{!isEmptyNew && <>[\s\S]*?ref=\{scrollContainerRef\}/);
+});
+
 test("streamed content shows a blinking caret while it renders", () => {
   const md = readFileSync(path.join(here, "MarkdownBody.tsx"), "utf8");
   // The cursor must appear only while the message is still streaming.
