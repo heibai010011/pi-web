@@ -96,8 +96,13 @@ test("deleting an unpersisted session shuts down its runtime and invalidates cac
     cacheSessionPath(id, filePath);
     let shutdownCalled = false;
     globalThis.__piSessions.set(id, {
+      sessionId: id,
+      sessionFile: filePath,
+      cwd: dir,
+      inner: { sessionManager: manager },
+      isAlive: () => true,
       isRunning: () => false,
-      shutdown: async () => {
+      shutdownForDeletion: async () => {
         shutdownCalled = true;
         if (persistOnShutdown) await writeFile(filePath, JSON.stringify(manager.getHeader()));
         globalThis.__piSessions.delete(id);
@@ -110,7 +115,7 @@ test("deleting an unpersisted session shuts down its runtime and invalidates cac
     );
 
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { ok: true });
+    assert.deepEqual(await response.json(), { ok: true, deletedIds: [id] });
     assert.equal(shutdownCalled, true);
     assert.equal(globalThis.__piSessions.has(id), false);
     assert.equal(globalThis.__piSessionPathCache.has(id), false);
@@ -146,7 +151,7 @@ test("live agent state is available before the session file is persisted", () =>
   assert.match(stateRoute, /if \(rpc\?\.isAlive\(\)\)/);
 });
 
-test("deleting an intermediate subagent reparents both relation representations", async (t) => {
+test("deleting an intermediate session deletes its owned subagent",  async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "pi-web-delete-reparent-"));
   const grandparentPath = join(dir, "grandparent.jsonl");
   const parentPath = join(dir, "parent.jsonl");
@@ -193,15 +198,76 @@ test("deleting an intermediate subagent reparents both relation representations"
 
   assert.equal(response.status, 200);
   await assert.rejects(readFile(parentPath), { code: "ENOENT" });
-  const [childHeaderLine, childMetadataLine] = (await readFile(childPath, "utf8")).trim().split("\n");
-  assert.equal(JSON.parse(childHeaderLine).parentSession, grandparentPath);
-  assert.deepEqual(JSON.parse(childMetadataLine).data, {
-    version: 1,
-    parentSessionId: "delete-reparent-grandparent",
-    parentSessionPath: grandparentPath,
-    profile: "Explore",
-    description: "Inspect parser",
+  await assert.rejects(readFile(childPath), { code: "ENOENT" });
+  assert.deepEqual(new Set((await response.json()).deletedIds), new Set([parentId, "delete-reparent-child"]));
+  assert.ok(await readFile(grandparentPath));
+});
+
+test("recursive DELETE drains runtime writes, discovers a late child, preserves live fork content and is idempotent", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-web-delete-live-family-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousRegistry = globalThis.__piSessions;
+  const previousStarts = globalThis.__piSubagentStarts;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  globalThis.__piSessions = new Map(); globalThis.__piSubagentStarts = new Map();
+  const ids = [];
+  const { publishSubagentCompletion, createSubagentController } = await jiti.import("../../../lib/subagent-runtime.ts");
+  const { isSessionDeletionBlocked } = await jiti.import("../../../lib/session-deletion-state.ts");
+  t.after(async () => {
+    process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    globalThis.__piSessions = previousRegistry; globalThis.__piSubagentStarts = previousStarts;
+    for (const id of ids) invalidateSessionPathCache(id);
+    invalidateSessionListCache(); await rm(dir, { recursive: true, force: true });
   });
+  const make = (parent, subagent = false) => {
+    const manager = SessionManager.create(dir, dir, parent ? { parentSession: parent.getSessionFile() } : undefined);
+    if (subagent) manager.appendCustomEntry("pi-web:subagent", { version: 1, parentSessionId: parent.getSessionId(), parentSessionPath: parent.getSessionFile(), profile: "test" });
+    manager.appendMessage({ role: "user", content: "fixture", timestamp: Date.now() });
+    manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "original" }], timestamp: Date.now() });
+    ids.push(manager.getSessionId()); cacheSessionPath(manager.getSessionId(), manager.getSessionFile());
+    return manager;
+  };
+  const root = make(); const child = make(root, true); const fork = make(child);
+  let notifications = 0;
+  const controller = createSubagentController({ getSession: () => undefined, registerSession() {}, resolveSessionPath: async () => { notifications++; return root.getSessionFile(); }, reopenSession: async () => { throw new Error("must not reopen"); }, invalidateSessionList() {} });
+  const register = (manager) => globalThis.__piSessions.set(manager.getSessionId(), {
+    sessionId: manager.getSessionId(), sessionFile: manager.getSessionFile(), cwd: dir,
+    inner: { sessionManager: manager }, isAlive: () => true, isRunning: () => true,
+    shutdownForDeletion: async () => {
+      assert.equal(isSessionDeletionBlocked(manager.getSessionId()), true);
+      await new Promise((resolve) => setImmediate(resolve));
+      manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "last shutdown message" }], timestamp: Date.now() });
+      if (manager === child) {
+        const run = { sessionId: child.getSessionId(), parentSessionId: root.getSessionId(), status: "completed", completedAt: new Date().toISOString() };
+        publishSubagentCompletion(manager, run, () => { throw new Error("deleted update must not publish"); });
+        await controller.extensionRuntime.notifyParent(run);
+      }
+      globalThis.__piSessions.delete(manager.getSessionId());
+    },
+  });
+  register(root); register(child); register(fork);
+  let finishStarting;
+  const starting = new Promise((resolve) => { finishStarting = () => {
+    const late = make(root, true); register(late); resolve();
+  }; });
+  globalThis.__piSubagentStarts.set(starting, root.getSessionId());
+  const request = () => deleteSession(new Request("http://localhost/api/sessions/fixture", { method: "DELETE" }), { params: Promise.resolve({ id: root.getSessionId() }) });
+  const first = request(); const second = request();
+  await new Promise((resolve) => setImmediate(resolve)); finishStarting();
+  const firstResponse = await first;
+  assert.equal(firstResponse.status, 200);
+  const deleted = (await firstResponse.json()).deletedIds;
+  assert.equal(deleted.length, 3);
+  assert.equal(deleted.includes(fork.getSessionId()), false);
+  assert.equal((await second).status, 200);
+  for (const id of deleted) assert.equal(globalThis.__piSessions.has(id), false);
+  await assert.rejects(readFile(root.getSessionFile()), { code: "ENOENT" });
+  await assert.rejects(readFile(child.getSessionFile()), { code: "ENOENT" });
+  const forkContent = await readFile(fork.getSessionFile(), "utf8");
+  assert.match(forkContent, /last shutdown message/);
+  assert.equal(JSON.parse(forkContent.split("\n")[0]).parentSession, undefined);
+  assert.equal(notifications, 0);
 });
 
 test("live detail and state routes work without a persisted JSONL file", async (t) => {

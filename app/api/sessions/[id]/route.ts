@@ -1,17 +1,14 @@
 import { NextResponse } from "next/server";
-import { existsSync, statSync, unlinkSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   attachSessionProjectInfo,
   resolveSessionPath,
   resolveSessionIdByPath,
-  invalidateSessionPathCache,
   invalidateSessionListCache,
   buildSessionContext,
-  listAllSessions,
-  readSessionHeader,
 } from "@/lib/session-reader";
-import { reparentDirectChildSessions } from "@/lib/session-delete-lineage";
+import { deleteSessionFamily } from "@/lib/session-delete";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { projectTreeForResponse } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
@@ -139,70 +136,9 @@ export async function DELETE(
 ) {
   const { id } = await params;
   try {
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    // Read only the bounded header before deleting.
-    let parentSessionPath: string | undefined;
-    try {
-      parentSessionPath = readSessionHeader(filePath)?.parentSession;
-    } catch (error) {
-      // Empty runtime sessions have a cached path before their first disk write.
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    // Keep the subagent metadata parent in sync with the session header.
-    let parentSessionId: string | undefined;
-    if (parentSessionPath) {
-      try {
-        // The parent may have been deleted or moved already; treat it as absent.
-        parentSessionId = readSessionHeader(parentSessionPath)?.id;
-      } catch {
-        parentSessionId = undefined;
-      }
-    }
-
-    // Stop the live parent before mutating any child file. If shutdown fails,
-    // the tree remains untouched instead of being left half-reparented.
-    await getRpcSession(id)?.shutdown();
-
-    // Re-attach direct children globally, not only sibling files. Subagents
-    // and worktree/custom-cwd sessions often live in a different encoded-cwd
-    // directory while still pointing at this parent session.
-    const sessions = await listAllSessions({ force: true });
-    const reparented = reparentDirectChildSessions(
-      sessions,
-      id,
-      filePath,
-      parentSessionPath,
-      parentSessionId,
-    );
-    if (reparented.failedIds.length > 0) {
-      // Never delete the parent if doing so would strand a known child with a
-      // dangling parentSession path. The user can retry after the I/O issue is
-      // resolved instead of silently corrupting the tree.
-      return NextResponse.json({
-        error: "Failed to reparent child sessions",
-        childSessionIds: reparented.failedIds,
-      }, { status: 500 });
-    }
-
-    try {
-      unlinkSync(filePath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        const rollbackFailedIds = reparented.rollback();
-        return NextResponse.json({
-          error: String(error),
-          ...(rollbackFailedIds.length > 0 ? { rollbackFailedChildSessionIds: rollbackFailedIds } : {}),
-        }, { status: 500 });
-      }
-    }
-    invalidateSessionPathCache(id);
-    invalidateSessionListCache();
-    return NextResponse.json({ ok: true });
+    const result = await deleteSessionFamily(id);
+    return NextResponse.json(result.body, { status: result.status });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: String(error), deletedIds: [] }, { status: 500 });
   }
 }

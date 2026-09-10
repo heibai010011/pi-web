@@ -253,7 +253,7 @@ export const enLocale: LocalePlugin = {
     "sidebar.agentRunning": "Agent running…",
     "sidebar.newActivity": "New activity",
     "sidebar.newSessionActivity": "New session activity",
-    "sidebar.deleteSession": "Delete {title}?",
+    "sidebar.deleteSession": "Delete {title} and its subagents? Forks are kept.",
     "sidebar.rename": "Rename",
     "sidebar.delete": "Delete",
     "sidebar.deleteWithShiftClick": "Delete (Shift+click to delete without confirmation)",

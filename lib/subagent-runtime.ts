@@ -1,3 +1,4 @@
+import { assertSessionNotDeleting, isSessionDeletionBlocked, waitForSessionDeletion } from "./session-deletion-state";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
   createAgentSessionFromServices,
@@ -71,6 +72,7 @@ type StoredSubagentExecution = {
 declare global {
   var __piSubagentRuns: Map<string, StoredSubagentExecution> | undefined;
   var __piSubagentStartingCounts: Map<string, number> | undefined;
+  var __piSubagentStarts: Map<Promise<SubagentExecution>, string> | undefined;
 }
 
 const MAX_CONCURRENT_SUBAGENTS = 4;
@@ -80,6 +82,19 @@ const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium
 function getSubagentRuns(): Map<string, StoredSubagentExecution> {
   if (!globalThis.__piSubagentRuns) globalThis.__piSubagentRuns = new Map();
   return globalThis.__piSubagentRuns;
+}
+
+/** Drain controller-owned finalizers before deleting their files. Abort alone
+ * only waits for SDK idle, not append-result/onUpdate continuations. */
+export async function settleSubagentStartsForDeletion(ids: ReadonlySet<string>): Promise<void> {
+  const starts = [...(globalThis.__piSubagentStarts ?? [])].filter(([, parentId]) => ids.has(parentId));
+  await Promise.allSettled(starts.map(([promise]) => promise));
+}
+
+export async function settleSubagentsForDeletion(ids: ReadonlySet<string>): Promise<void> {
+  const runs = [...getSubagentRuns()].filter(([id]) => ids.has(id));
+  for (const [, stored] of runs) stored.abortRequested = true;
+  await Promise.allSettled(runs.map(([, stored]) => stored.completion));
 }
 
 function getSubagentStartingCounts(): Map<string, number> {
@@ -129,13 +144,40 @@ function reserveSubagentSlot(parentSessionId: string): () => void {
   };
 }
 
+/** Keep result persistence and UI publication behind the same deletion fence. */
+export function publishSubagentCompletion(
+  sessionManager: Pick<SessionManager, "appendCustomEntry">,
+  run: SubagentRunInfo,
+  onUpdate?: (run: SubagentRunInfo) => void,
+): void {
+  if (isSessionDeletionBlocked(run.sessionId)) return;
+  const persisted: SubagentResultMetadata = {
+    version: 1,
+    status: run.status as SubagentResultMetadata["status"],
+    completedAt: run.completedAt!,
+    ...(run.result ? { result: run.result } : {}),
+    ...(run.error ? { error: run.error } : {}),
+  };
+  sessionManager.appendCustomEntry(SUBAGENT_RESULT_TYPE, persisted);
+  onUpdate?.(run);
+}
+
 export function createSubagentController(
   dependencies: SubagentRuntimeDependencies,
 ): SubagentController {
-  async function start(request: StartSubagentRequest): Promise<SubagentExecution> {
+  function start(request: StartSubagentRequest): Promise<SubagentExecution> {
+    const promise = startExecution(request);
+    const starts = globalThis.__piSubagentStarts ??= new Map();
+    starts.set(promise, request.parentContext.sessionManager.getSessionId());
+    void promise.finally(() => starts.delete(promise)).catch(() => {});
+    return promise;
+  }
+
+  async function startExecution(request: StartSubagentRequest): Promise<SubagentExecution> {
     const enabled = dependencies.isBuiltInSubagentsEnabled ?? isBuiltInSubagentsEnabled;
     if (!enabled()) throw new Error("Pi Web built-in sub-agents are disabled");
     const parentSessionId = request.parentContext.sessionManager.getSessionId();
+    assertSessionNotDeleting(parentSessionId);
     const parent = dependencies.getSession(parentSessionId);
     if (!parent?.isAlive()) throw new Error("Parent session is no longer available");
     if (!parent.sessionFile) throw new Error("Parent session must be persisted before starting a subagent");
@@ -206,6 +248,7 @@ export function createSubagentController(
         settingsManager.getDefaultTools(),
       );
 
+      assertSessionNotDeleting(parentSessionId);
       const sessionManager = SessionManager.create(parent.cwd, undefined, { parentSession: parent.sessionFile });
       const createdAt = new Date().toISOString();
       const metadata: SubagentMetadata = {
@@ -246,6 +289,9 @@ export function createSubagentController(
         chatOnly,
       });
 
+      // Keep the registered (possibly unpersisted) child discoverable by the
+      // deletion rescan, but never launch a prompt after its parent was fenced.
+      assertSessionNotDeleting(parentSessionId);
       const initialRun: SubagentRunInfo = {
         sessionId: inner.sessionId,
         sessionPath: inner.sessionFile ?? sessionManager.getSessionFile() ?? "",
@@ -330,19 +376,14 @@ export function createSubagentController(
           request.signal?.removeEventListener("abort", handleParentAbort);
         }
 
-        const persisted: SubagentResultMetadata = {
-          version: 1,
-          status: result.status as SubagentResultMetadata["status"],
-          completedAt: result.completedAt!,
-          ...(result.result ? { result: result.result } : {}),
-          ...(result.error ? { error: result.error } : {}),
-        };
-        sessionManager.appendCustomEntry(SUBAGENT_RESULT_TYPE, persisted);
-        stored.run = result;
-        request.onUpdate?.(result);
-        getSubagentRuns().delete(initialRun.sessionId);
-        dependencies.invalidateSessionList();
-        return result;
+        try {
+          publishSubagentCompletion(sessionManager, result, request.onUpdate);
+          stored.run = result;
+          return result;
+        } finally {
+          getSubagentRuns().delete(initialRun.sessionId);
+          dependencies.invalidateSessionList();
+        }
       })();
 
       return { run: initialRun, completion: stored.completion };
@@ -377,15 +418,29 @@ export function createSubagentController(
     await wrapper.inner.steer(message.trim());
   }
 
-  async function notifyParent(run: SubagentRunInfo): Promise<void> {
+  async function notifyParent(run: SubagentRunInfo, retries = 0): Promise<void> {
+    const deleted = () => isSessionDeletionBlocked(run.sessionId) || globalThis.__piSessionDeleted?.has(run.parentSessionId);
+    if (deleted()) return;
+    await waitForSessionDeletion(run.parentSessionId);
+    if (deleted()) return;
     let parent = dependencies.getSession(run.parentSessionId);
     if (!parent?.isAlive()) {
       const sessionFile = await dependencies.resolveSessionPath(run.parentSessionId);
+      await waitForSessionDeletion(run.parentSessionId);
+      if (deleted()) return;
       if (!sessionFile) throw new Error(`Parent session not found: ${run.parentSessionId}`);
       parent = await dependencies.reopenSession(run.parentSessionId, sessionFile);
     }
     await parent.waitUntilReady();
-    if (!parent.isAlive()) throw new Error(`Parent session is no longer available: ${run.parentSessionId}`);
+    if (globalThis.__piSessionDeletionBlocked?.has(run.parentSessionId)) {
+      await waitForSessionDeletion(run.parentSessionId);
+      if (!deleted() && retries < 3) return notifyParent(run, retries + 1);
+    }
+    if (deleted()) return;
+    if (!parent.isAlive()) {
+      if (retries < 3) return notifyParent(run, retries + 1);
+      throw new Error(`Parent session is no longer available: ${run.parentSessionId}`);
+    }
     await parent.inner.sendCustomMessage({
       customType: "pi-web:subagent-notification",
       content: subagentFinalText(run),

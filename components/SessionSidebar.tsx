@@ -9,7 +9,8 @@ import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
-import { countSessionTreeNodes, groupSessionTrees, removeSessionOrganizationReferences } from "@/lib/session-tree-groups";
+import { countSessionTreeNodes, groupSessionTrees, removeDeletedSessionOrganizationReferences } from "@/lib/session-tree-groups";
+import { readDeletedSessionIds } from "@/lib/session-delete-client";
 import { FOLDER_HIGHLIGHT_MS, registerAutoSessionFolderDraft, registerSessionFolderDraft, SESSION_ORGANIZATION_CHANGED_EVENT } from "@/lib/session-folder-drafts";
 import { buildFolderTree, folderDescendantIds, folderSubtreeIds, removeFolderPromotingChildren, wouldCreateFolderCycle, type FolderNode } from "@/lib/session-folder-tree";
 import { buildCurrentWorkSections, splitOlderSessionTrees, type SessionSidebarTimeSection } from "@/lib/session-sidebar-sections";
@@ -127,7 +128,7 @@ interface Props {
   skipInitialProjectSelection?: boolean;
   onInitialRestoreDone?: () => void;
   refreshKey?: number;
-  onSessionDeleted?: (sessionId: string) => void;
+  onSessionDeleted?: (sessionIds: string[]) => void;
   selectedCwd?: string | null;
   onCwdChange?: (
     cwd: string | null,
@@ -1455,15 +1456,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     targets.sort((a, b) => targetDepth(a) - targetDepth(b));
     setBulkDeleting(true);
     try {
+      const alreadyDeleted = new Set<string>();
       for (const id of targets) {
+        if (alreadyDeleted.has(id)) continue;
         try {
           const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
-          if (!response.ok) continue;
-          hideDeletedSession(id);
-          onSessionDeleted?.(id);
-          // Preserve organization for surviving/reparented children while
-          // removing the deleted session's own references.
-          updateSessionOrg((org) => removeSessionOrganizationReferences(org, id, allSessions));
+          if (!response.ok) {
+            const failure = await response.clone().json().catch(() => null);
+            window.alert(failure?.error ?? `Delete failed (${response.status})`);
+          }
+          const deletedIds = await readDeletedSessionIds(response, id);
+          for (const deletedId of deletedIds) {
+            alreadyDeleted.add(deletedId);
+            hideDeletedSession(deletedId);
+          }
+          if (deletedIds.length) onSessionDeleted?.(deletedIds);
+          updateSessionOrg((org) => removeDeletedSessionOrganizationReferences(org, deletedIds, allSessions));
         } catch {
           // continue with the rest
         }
@@ -1598,13 +1606,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     [flatList, ungroupedTree],
   );
 
-  const handleDeletedSessionOrganization = (id: string) => {
-    hideDeletedSession(id);
-    onSessionDeleted?.(id);
-    // Every rendering path (pinned, folder, ungrouped tree) uses this cleanup.
-    // Keeping it centralized prevents invisible stale assignments after a
-    // child/root session is deleted from a nested tree.
-    updateSessionOrg((org) => removeSessionOrganizationReferences(org, id, filteredSessions));
+  const handleDeletedSessionOrganization = (ids: string[]) => {
+    for (const id of ids) hideDeletedSession(id);
+    onSessionDeleted?.(ids);
+    // Use the global list: a cascade may include subagents in other cwds.
+    updateSessionOrg((org) => removeDeletedSessionOrganizationReferences(org, ids, allSessions));
     loadSessions();
   };
 
@@ -2845,7 +2851,7 @@ function SessionTreeItem({
   unreadSessionIds: Set<string>;
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
-  onSessionDeleted?: (id: string) => void;
+  onSessionDeleted?: (ids: string[]) => void;
   depth: number;
   pinnedIds: Set<string>;
   onTogglePinned: (id: string) => void;
@@ -3393,7 +3399,7 @@ function SessionItem({
   isUnread?: boolean;
   onClick: () => void;
   onRenamed?: () => void;
-  onDeleted?: (id: string) => void;
+  onDeleted?: (ids: string[]) => void;
   depth?: number;
   hasChildren?: boolean;
   collapsed?: boolean;
@@ -3504,10 +3510,12 @@ function SessionItem({
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
       if (!response.ok) {
-        setDeleting(false);
-        return;
+        const failure = await response.clone().json().catch(() => null);
+        window.alert(failure?.error ?? `Delete failed (${response.status})`);
       }
-      onDeleted?.(session.id);
+      const deletedIds = await readDeletedSessionIds(response, session.id);
+      if (deletedIds.length) onDeleted?.(deletedIds);
+      if (!deletedIds.includes(session.id)) setDeleting(false);
     } catch {
       setDeleting(false);
     }

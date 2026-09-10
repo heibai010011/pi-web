@@ -253,7 +253,7 @@ export const zhTWLocale: LocalePlugin = {
     "sidebar.agentRunning": "Agent 執行中…",
     "sidebar.newActivity": "有新活動",
     "sidebar.newSessionActivity": "工作階段有新活動",
-    "sidebar.deleteSession": "刪除 {title}？",
+    "sidebar.deleteSession": "刪除 {title} 及其子代理？一般分支會保留。",
     "sidebar.rename": "重新命名",
     "sidebar.delete": "刪除",
     "sidebar.deleteWithShiftClick": "刪除（按住 Shift 點選可跳過確認）",

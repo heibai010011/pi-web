@@ -192,6 +192,32 @@ export function removeSessionOrganizationReferences(
   return { ...org, pinned, assignments };
 }
 
+/** Clean a cascade as one operation; never hand organization down to another
+ * deleted ID. Forks below deleted subagents inherit the deleted family's row. */
+export function removeDeletedSessionOrganizationReferences(
+  org: SessionOrganization,
+  deletedIds: readonly string[],
+  sessions: SessionInfo[],
+): SessionOrganization {
+  const deleted = new Set(deletedIds);
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const reattached = sessions.map((session) => {
+    if (deleted.has(session.id) || !session.parentSessionId || !deleted.has(session.parentSessionId)) return session;
+    let parent = byId.get(session.parentSessionId);
+    const visited = new Set<string>();
+    while (parent?.parentSessionId && deleted.has(parent.parentSessionId) && !visited.has(parent.id)) {
+      visited.add(parent.id);
+      parent = byId.get(parent.parentSessionId);
+    }
+    return { ...session, parentSessionId: parent?.id ?? session.parentSessionId };
+  });
+  let next = org;
+  for (const id of deleted) next = removeSessionOrganizationReferences(next, id, reattached.filter((session) => !deleted.has(session.id) || session.id === id));
+  const assignments = { ...next.assignments };
+  for (const id of deleted) delete assignments[id];
+  return { ...next, assignments, pinned: next.pinned.filter((id) => !deleted.has(id)) };
+}
+
 function assignmentsEqual(
   a: Readonly<Record<string, string>>,
   b: Readonly<Record<string, string>>,

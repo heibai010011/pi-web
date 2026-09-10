@@ -137,7 +137,16 @@ hooks/
 - **In-session branch** (Continue button / BranchNavigator): calls `navigate_tree` within the same file. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=`.
 
 ### Session files can be fully rewritten
-`parentSession` in the header is **display metadata only** — has zero effect on chat content. Safe to `writeFileSync` the entire file (pi does this itself during migrations). Used when cascade-reparenting children on delete.
+`parentSession` in the header is **display metadata only** — has zero effect on chat content. Pi rewrites entire files during migrations; web mutations must first drain live writers and use atomic writes.
+
+### Session deletion and subagent ownership
+- `lib/session-delete.ts` coordinates deletion. Delete the requested session and recursively follow **subagent ownership edges only**. Ordinary forks (and their own subagent families) survive; forks immediately below a deleted node reattach to the nearest surviving ancestor, or become roots.
+- Discover across the global disk list and **all** runtime snapshots, including empty/unpersisted sessions and cross-cwd children. Validate candidate JSONL metadata and header lineage; a fork that inherited its source's subagent metadata is not an owned child.
+- Fence affected IDs before awaiting startup/abort. `shutdownForDeletion()` drains accepted prompts and active commands; the subagent controller drains completion finalizers. Result append, onUpdate, parent notification/reopen and new prompt admission all honor the deletion fence. Ordinary idle shutdown behavior is unchanged.
+- Surviving forks whose headers change are stopped too, then re-read from disk, so stale SessionManager state cannot overwrite reparenting. Their history and final shutdown messages remain intact; their interrupted work is not automatically resumed.
+- Next HMR may retain wrappers created before deletion draining existed. Busy legacy wrappers fail closed with HTTP 409 and an actionable error: stop and reload the session, then retry. Idle legacy wrappers shut down gracefully.
+- File changes roll back on ordinary I/O failure; failures report `rollbackFailedIds`. This is not a crash journal and cannot coordinate external TUI processes writing the same files. Do not delete files before runtime draining finishes.
+- DELETE returns `{ ok: true, deletedIds }`; errors can also carry partial `deletedIds`. Sidebar single/bulk deletion consumes the entire set, clears organization references across cwds, and AppShell clears a selected deleted subagent. Repeated successful deletion is idempotent within the server process. Regression tests use temporary fixtures only.
 
 ### ToolCall field normalization
 Pi stores toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolCallContent` uses `{toolCallId, toolName, input}`. `normalizeToolCalls()` in `lib/normalize.ts` handles this — called in both `session-reader.ts` (file load) and `ChatWindow.handleAgentEvent()` (streaming).

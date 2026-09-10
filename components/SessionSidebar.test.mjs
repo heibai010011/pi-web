@@ -139,18 +139,19 @@ test("creating a folder from a session menu moves that session into it", () => {
 
 test("failed rename and delete requests do not report successful mutations", () => {
   assert.match(sessionItemSource, /if \(response\.ok\) onRenamed\?\.\(\);/);
-  assert.match(sessionItemSource, /if \(!response\.ok\) \{\s*setDeleting\(false\);\s*return;/);
-  assert.match(source, /if \(!response\.ok\) continue;/);
+  assert.match(sessionItemSource, /const deletedIds = await readDeletedSessionIds\(response, session\.id\)/);
+  assert.match(sessionItemSource, /if \(deletedIds\.length\) onDeleted\?\.\(deletedIds\)/);
+  assert.match(sessionItemSource, /if \(!deletedIds\.includes\(session\.id\)\) setDeleting\(false\)/);
 });
 
 test("every session delete path purges or hands down organization metadata", () => {
-  assert.match(source, /const handleDeletedSessionOrganization[\s\S]*?removeSessionOrganizationReferences\(org, id, filteredSessions\)/);
+  assert.match(source, /const handleDeletedSessionOrganization[\s\S]*?removeDeletedSessionOrganizationReferences\(org, ids, allSessions\)/);
   assert.match(source, /onSessionDeleted=\{handleDeletedSessionOrganization\}/);
 });
 
 test("successful deletion hides the row before cleaning folder organization", () => {
-  assert.match(source, /const handleDeletedSessionOrganization = \(id: string\) => \{\s*hideDeletedSession\(id\);\s*onSessionDeleted\?\.\(id\);[\s\S]*?updateSessionOrg/);
-  assert.match(source, /if \(!response\.ok\) continue;\s*hideDeletedSession\(id\);\s*onSessionDeleted\?\.\(id\);/);
+  assert.match(source, /const handleDeletedSessionOrganization = \(ids: string\[\]\) => \{\s*for \(const id of ids\) hideDeletedSession\(id\);\s*onSessionDeleted\?\.\(ids\);[\s\S]*?updateSessionOrg/);
+  assert.match(source, /for \(const deletedId of deletedIds\) \{[\s\S]*?hideDeletedSession\(deletedId\);[\s\S]*?onSessionDeleted\?\.\(deletedIds\)/);
 });
 
 test("deleted-session tombstones filter stale session-list responses", () => {

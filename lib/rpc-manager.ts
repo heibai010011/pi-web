@@ -25,7 +25,6 @@ import type {
   ExtensionUiResponse,
   ExtensionWidgetItem,
   SessionEntry,
-  SessionInfo,
   SessionMessageEntry,
 } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS, type HeadlessCustomUiTui } from "./custom-ui-terminal";
@@ -39,7 +38,10 @@ import {
   readSubagentSessionResources,
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
-import { createSubagentController } from "./subagent-runtime";
+import { createSubagentController, settleSubagentStartsForDeletion, settleSubagentsForDeletion } from "./subagent-runtime";
+import { assertSessionNotDeleting, isSessionDeletionBlocked, SessionDeletionConflict } from "./session-deletion-state";
+import { sessionPathKey } from "./session-path";
+import type { DeletionSessionInfo } from "./session-delete-lineage";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
@@ -227,6 +229,9 @@ export class AgentSessionWrapper {
   private extensionWidgetGenerations = new Map<string, number>();
   private extensionWidgetsResetting = false;
   private pendingPromptCount = 0;
+  private deletionPending = false;
+  private pendingPrompts = new Set<Promise<void>>();
+  private commandDrainWaiters: Array<() => void> = [];
   private activeMutatingCommands = 0;
   private sessionReplacement: "fork" | "clone" | null = null;
   private agentRunNeedsCompletion = false;
@@ -308,7 +313,7 @@ export class AgentSessionWrapper {
   }
 
   private notifyAgentRunCompleteIfIdle(): void {
-    if (!this.agentRunNeedsCompletion || this.isRunning()) return;
+    if (this.deletionPending || isSessionDeletionBlocked(this.sessionId) || !this._alive || !this.agentRunNeedsCompletion || this.isRunning()) return;
     this.agentRunNeedsCompletion = false;
     if (this.suppressCompletionNotifications) return;
     try {
@@ -541,6 +546,8 @@ export class AgentSessionWrapper {
   }
 
   async send(command: Record<string, unknown>): Promise<unknown> {
+    assertSessionNotDeleting(this.sessionId);
+    if (this.deletionPending || !this._alive) throw new Error("Session is no longer available");
     const type = command.type as string;
     const allowedDuringReplacement = COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT.has(type);
     if (this.sessionReplacement && !allowedDuringReplacement) {
@@ -557,6 +564,7 @@ export class AgentSessionWrapper {
       // Status reconciliation must not postpone forced cleanup after Stop.
       if (type !== "get_state") this.resetIdleTimer();
       if (this.shouldWaitForExtensions(type)) await this.waitForExtensionsBound();
+      assertSessionNotDeleting(this.sessionId);
       if (this.sessionReplacement && !allowedDuringReplacement) {
         throw new Error("Session is being copied to a new session");
       }
@@ -573,6 +581,7 @@ export class AgentSessionWrapper {
         // this submission starts a run or joins its streaming queue.
         const releaseAdmission = await this.acquirePromptAdmission();
         try {
+          assertSessionNotDeleting(this.sessionId);
           if (this.inner.isBashRunning) {
             throw new Error("Cannot send a prompt while a shell command is running");
           }
@@ -631,6 +640,8 @@ export class AgentSessionWrapper {
             throw error;
           }
 
+          this.pendingPrompts.add(prompt);
+          void prompt.finally(() => this.pendingPrompts.delete(prompt)).catch(() => {});
           void prompt.then(() => {
             // Compatibility fallback if a future SDK resolves without invoking
             // the internal callback. This waits for the run, but never acks early.
@@ -998,6 +1009,9 @@ export class AgentSessionWrapper {
       }
     } finally {
       if (tracksMutation) this.activeMutatingCommands = Math.max(0, this.activeMutatingCommands - 1);
+      if (this.activeMutatingCommands === 0) {
+        for (const resolve of this.commandDrainWaiters.splice(0)) resolve();
+      }
     }
   }
 
@@ -1047,6 +1061,21 @@ export class AgentSessionWrapper {
         );
       })
       .finally(finishDispose);
+  }
+
+  /** Deletion is stronger than idle shutdown: stop SDK work and every owned
+   * prompt/command continuation before callers mutate any session files. */
+  async shutdownForDeletion(): Promise<void> {
+    this.deletionPending = true;
+    this.agentRunNeedsCompletion = false;
+    this.extensionUiAbortController.abort(new DOMException("Session deleted", "AbortError"));
+    this.inner.abortBash();
+    await this.inner.abort();
+    await Promise.allSettled([...this.pendingPrompts]);
+    if (this.activeMutatingCommands > 0) {
+      await new Promise<void>((resolve) => this.commandDrainWaiters.push(resolve));
+    }
+    await this.shutdown();
   }
 
   async shutdown(): Promise<void> {
@@ -1828,8 +1857,9 @@ function runtimeMessageActivityMs(entry: SessionMessageEntry): number | undefine
  * the first JSONL flush until an assistant message exists, so an accepted new
  * prompt must temporarily be described from its in-memory SessionManager.
  */
-export function getRpcSessionInfos(): SessionInfo[] {
-  const sessions: SessionInfo[] = [];
+export function getRpcSessionInfos(includeEmpty = false): DeletionSessionInfo[] {
+  const sessions: DeletionSessionInfo[] = [];
+  const pathIds = new Map([...getRegistry().values()].filter((s) => s.sessionFile).map((s) => [sessionPathKey(s.sessionFile), s.sessionId]));
   for (const session of getRegistry().values()) {
     if (!session.isAlive()) continue;
 
@@ -1846,7 +1876,7 @@ export function getRpcSessionInfos(): SessionInfo[] {
 
     // An ensure_session call creates an idle, empty runtime while the composer
     // loads commands. Do not leak it into history before a prompt is accepted.
-    if (!persisted && (!session.isRunning() || !firstUserMessage)) continue;
+    if (!includeEmpty && !persisted && (!session.isRunning() || !firstUserMessage)) continue;
 
     const created = header?.timestamp
       ?? entries[0]?.timestamp
@@ -1877,10 +1907,46 @@ export function getRpcSessionInfos(): SessionInfo[] {
           status: session.isRunning() ? "running" as const : subagent.status,
         },
       } : {}),
+      ...(!subagent && header?.parentSession ? {
+        parentSessionId: pathIds.get(sessionPathKey(header.parentSession)),
+        relation: { kind: "fork" as const },
+      } : {}),
+      ...(includeEmpty && !persisted && header ? {
+        runtimeContent: [header, ...entries].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+      } : {}),
       transient: !persisted,
     });
   }
   return sessions;
+}
+
+export async function drainSessionStartsForDeletion(ids: ReadonlySet<string>): Promise<void> {
+  await Promise.allSettled([...getLocks()].filter(([id]) => ids.has(id)).map(([, promise]) => promise));
+  await settleSubagentStartsForDeletion(ids);
+}
+
+export async function shutdownSessionsForDeletion(ids: ReadonlySet<string>): Promise<void> {
+  for (const id of ids) {
+    const wrapper = getRegistry().get(id);
+    if (wrapper && typeof wrapper.shutdownForDeletion !== "function" && wrapper.isRunning()) {
+      throw new SessionDeletionConflict("Session predates the deletion update; stop it and reload the session before deleting");
+    }
+  }
+  const results = await Promise.allSettled([...ids].map(async (id) => {
+    const wrapper = getRegistry().get(id);
+    if (!wrapper) return;
+    // globalThis survives Next HMR: old class instances cannot safely drain
+    // prompt continuations they never tracked. Fail closed while any is busy.
+    if (typeof wrapper.shutdownForDeletion !== "function") {
+      if (wrapper.isRunning()) throw new SessionDeletionConflict("Session predates the deletion update; stop it and reload the session before deleting");
+      await wrapper.shutdown();
+    } else {
+      await wrapper.shutdownForDeletion();
+    }
+  }));
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure?.status === "rejected") throw failure.reason;
+  await settleSubagentsForDeletion(ids);
 }
 
 export function hasBusyRpcSessionForCwd(cwd: string): boolean {
@@ -1931,6 +1997,7 @@ export async function startRpcSession(
   cwd: string | undefined,
   options: RpcSessionStartOptions = {},
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
+  assertSessionNotDeleting(sessionId);
   const { initialModel, allowInitialModelFallback, thinkingLevel } = options;
   const requestedToolNames = options.toolNames === undefined
     ? undefined
@@ -2117,6 +2184,8 @@ export async function startRpcSession(
     });
     const realSessionId = inner.sessionId as string;
     registerRpcWrapper(wrapper);
+    // Deletion waits for start locks and then drains this registered wrapper.
+    assertSessionNotDeleting(sessionId);
 
     return { session: wrapper, realSessionId };
   })().finally(() => {
