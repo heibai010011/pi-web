@@ -5,6 +5,8 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkFrontmatter from "remark-frontmatter";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import remarkCjkFriendly from "remark-cjk-friendly/parseOnly";
+import { fromMarkdown } from "mdast-util-from-markdown";
 
 const markdownSanitizeSchema = {
   ...defaultSchema,
@@ -23,48 +25,129 @@ export function markdownUrlTransform(value: string): string {
   return /^file:/i.test(value) ? value : defaultUrlTransform(value);
 }
 
-const escapedInlineCodePattern = /(?<![\\`])`((?:[^`\n]|\\`)+?)(?<![\\`])`(?!`)/g;
+// Use the CommonMark parser's source ranges, rather than a second approximate
+// fence parser. This also covers nested list/quote fences and multiline spans.
+function protectCode(markdown: string, includeSingleSpans: boolean) {
+  const ranges: Array<[number, number]> = [];
+  const tree = fromMarkdown(markdown);
+  const pending: Array<typeof tree | (typeof tree.children)[number]> = [tree];
+  while (pending.length) {
+    const node = pending.pop()!;
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (start !== undefined && end !== undefined && (
+      node.type === "code" || (!includeSingleSpans && (node.type === "link" || node.type === "image" || node.type === "definition")) ||
+      (node.type === "inlineCode" && (includeSingleSpans || markdown.slice(start).startsWith("``")))
+    )) {
+      ranges.push([start, end]);
+      continue;
+    }
+    if ("children" in node) {
+      for (let i = node.children.length - 1; i >= 0; i--) pending.push(node.children[i] as typeof node);
+    }
+  }
+  // Choose a sentinel absent from the source; source text must round-trip even
+  // if a user happens to paste one of our private-use characters.
+  const occupied = new Set(Array.from(markdown.matchAll(/\uE000(\d+)\uE001/g), (match) => match[1]));
+  let namespace = 0;
+  while (occupied.has(String(namespace))) namespace++;
+  const sentinel = `\uE000${namespace}\uE001`;
+  const tokenPattern = `${sentinel}(\\d+)\uE002`;
+  const protectedPattern = new RegExp(tokenPattern);
+  const originals: string[] = [];
+  let cursor = 0;
+  let masked = "";
+  for (const [start, end] of ranges) {
+    masked += markdown.slice(cursor, start);
+    masked += markdown.slice(start, end).replace(/[^\r\n]+/g, (part) => {
+      const token = `${sentinel}${originals.length}\uE002`;
+      originals.push(part);
+      return token;
+    });
+    cursor = end;
+  }
+  masked += markdown.slice(cursor);
+  return {
+    masked,
+    hasProtected: (line: string) => protectedPattern.test(line),
+    restore(value: string) {
+      return value.replace(new RegExp(tokenPattern, "g"), (_, id: string) => originals[Number(id)]);
+    },
+  };
+}
+
+function isEscaped(value: string, index: number): boolean {
+  let count = 0;
+  while (index > 0 && value[--index] === "\\") count++;
+  return count % 2 === 1;
+}
 
 function rewriteEscapedInlineCodeBackticks(line: string): string {
-  return line.replace(escapedInlineCodePattern, (match, content: string) => {
+  // A not-yet-closed multi-backtick span may be a streaming prefix. Do not
+  // reinterpret its interior as our nonstandard single-tick compatibility form.
+  for (const run of line.matchAll(/`{2,}/g)) {
+    if (!isEscaped(line, run.index)) return line;
+  }
+  let result = "";
+  let cursor = 0;
+  for (let start = 0; start < line.length; start++) {
+    if (line[start] !== "`" || isEscaped(line, start) || line[start - 1] === "`" || line[start + 1] === "`") continue;
+    let end = start + 1;
+    while (end < line.length && (line[end] !== "`" || isEscaped(line, end))) end++;
+    if (end === line.length) break;
+    // A multi-backtick delimiter belongs to CommonMark, not this compatibility
+    // syntax. Never split it into single-backtick spans.
+    if (line[end + 1] === "`") continue;
+    const content = line.slice(start + 1, end);
     const code = content.replace(/\\`/g, "`");
-    if (code === content) return match;
-    const marker = "`".repeat(Math.max(...(code.match(/`+/g)?.map((run) => run.length) ?? [0])) + 1);
-    return `${marker}${code}${marker}`;
-  });
+    if (code !== content) {
+      const marker = "`".repeat(Math.max(...(code.match(/`+/g)?.map((run) => run.length) ?? [0])) + 1);
+      // CommonMark strips one surrounding space when content is not all spaces.
+      // Padding prevents edge backticks merging into the delimiter run.
+      const pad = code.startsWith("`") || code.endsWith("`") || (code.startsWith(" ") && code.endsWith(" ") && /\S/.test(code));
+      result += line.slice(cursor, start) + marker + (pad ? " " : "") + code + (pad ? " " : "") + marker;
+      cursor = end + 1;
+    }
+    start = end;
+  }
+  return result + line.slice(cursor);
 }
 
 export function normalizeDisplayMath(markdown: string): string {
+  // Ordinary prose (including streaming CJK emphasis) needs no preprocessing.
+  if (!/[\\$]/.test(markdown)) return markdown;
+  if (!markdown.includes("\\`")) {
+    const protectedCode = protectCode(markdown, true);
+    return protectedCode.restore(normalizeUnprotectedMath(protectedCode.masked, protectedCode.hasProtected));
+  }
+  const protectedSource = protectCode(markdown, false);
+  let rawTag: string | null = null;
+  const rewritten = protectedSource.restore(protectedSource.masked.split("\n").map((line) => {
+    const tag = rawTag ?? line.match(/<(code|pre|script|style)\b/i)?.[1]?.toLowerCase();
+    if (tag) {
+      rawTag = new RegExp(`</${tag}\\s*>`, "i").test(line) ? null : tag;
+      return line;
+    }
+    // Preserve the existing conservative HTML-line policy.
+    return /<(?:!--|\/?[A-Za-z][^>]*>)/.test(line) ? line : rewriteEscapedInlineCodeBackticks(line);
+  }).join("\n"));
+  const protectedCode = protectCode(rewritten, true);
+  return protectedCode.restore(normalizeUnprotectedMath(protectedCode.masked, protectedCode.hasProtected));
+}
+
+function normalizeUnprotectedMath(markdown: string, hasProtected: (line: string) => boolean): string {
   const lineBreak = markdown.includes("\r\n") ? "\r\n" : "\n";
   const lines = markdown.split(/\r?\n/);
   const normalized: string[] = [];
-  let fence: { marker: string; size: number } | null = null;
-  let inlineCodeMarkerSize = 0;
   let rawCodeTag: string | null = null;
   const unmatchedDisplayMathUntil = new Map<string, number>();
 
   for (let index = 0; index < lines.length; index++) {
-    let line = lines[index];
+    const line = lines[index];
 
     if (rawCodeTag) {
       normalized.push(line);
       if (new RegExp(`</${rawCodeTag}\\s*>`, "i").test(line)) rawCodeTag = null;
-      continue;
-    }
-
-    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
-    if (fenceMatch) {
-      const marker = fenceMatch[1][0];
-      const size = fenceMatch[1].length;
-      if (!fence) fence = { marker, size };
-      else if (marker === fence.marker && size >= fence.size) fence = null;
-      inlineCodeMarkerSize = 0;
-      normalized.push(line);
-      continue;
-    }
-
-    if (fence) {
-      normalized.push(line);
       continue;
     }
 
@@ -73,22 +156,17 @@ export function normalizeDisplayMath(markdown: string): string {
       const tag = rawCodeOpen[1].toLowerCase();
       const remainder = line.slice((rawCodeOpen.index ?? 0) + rawCodeOpen[0].length);
       if (!new RegExp(`</${tag}\\s*>`, "i").test(remainder)) rawCodeTag = tag;
-      inlineCodeMarkerSize = 0;
       normalized.push(line);
       continue;
     }
 
     if (/^(?: {4}|\t)/.test(line) || line.trim() === "") {
-      inlineCodeMarkerSize = 0;
       normalized.push(line);
       continue;
     }
 
-    if (!inlineCodeMarkerSize) line = rewriteEscapedInlineCodeBackticks(line);
-
-    if (inlineCodeMarkerSize || line.includes("`")) {
-      inlineCodeMarkerSize = updateInlineCodeMarker(line, inlineCodeMarkerSize);
-      normalized.push(line);
+    if (hasProtected(line)) {
+      normalized.push(normalizeInlineLatexMath(line, hasProtected));
       continue;
     }
 
@@ -125,7 +203,7 @@ export function normalizeDisplayMath(markdown: string): string {
 
     const bracketDisplayStart = line.match(/^([ ]{0,3})\\\[[ \t]*$/);
     if (bracketDisplayStart) {
-      const closingIndex = findBracketDisplayClose(lines, index + 1);
+      const closingIndex = findBracketDisplayClose(lines, index + 1, hasProtected);
       if (closingIndex !== -1) {
         // Same lazy-continuation guard as above: indent content lines that sit at
         // column 0 so the block stays parseable when nested inside a list item.
@@ -174,6 +252,7 @@ export function normalizeDisplayMath(markdown: string): string {
           index + 1,
           indent,
           unmatchedDisplayMathUntil,
+          hasProtected,
         );
         if (closing) {
           normalized.push(`${indent}$$`, `${indent}${firstLine}`);
@@ -204,6 +283,7 @@ export function normalizeDisplayMath(markdown: string): string {
         index + 1,
         indent,
         unmatchedDisplayMathUntil,
+        hasProtected,
       );
       if (closing && (closing.glued || indent !== "")) {
         normalized.push(`${indent}$$`);
@@ -217,7 +297,7 @@ export function normalizeDisplayMath(markdown: string): string {
       }
     }
 
-    normalized.push(normalizeInlineLatexMath(line));
+    normalized.push(normalizeInlineLatexMath(line, hasProtected));
   }
 
   return normalized.join(lineBreak);
@@ -234,6 +314,7 @@ function findDisplayMathClose(
   startIndex: number,
   indent: string,
   unmatchedUntil: Map<string, number>,
+  hasProtected: (line: string) => boolean,
 ): DisplayMathClose | null {
   const knownUnmatchedUntil = unmatchedUntil.get(indent);
   if (knownUnmatchedUntil !== undefined && startIndex < knownUnmatchedUntil) return null;
@@ -244,7 +325,7 @@ function findDisplayMathClose(
 
     // A new Markdown block cannot belong to the preceding formula. In particular,
     // do not let a later sibling list item provide a closing `$$` for this block.
-    if (isDisplayMathBlockBoundary(line) || isDisplayMathOpeningLine(line)) {
+    if (hasProtected(line) || isDisplayMathBlockBoundary(line) || isDisplayMathOpeningLine(line)) {
       unmatchedUntil.set(indent, index);
       return null;
     }
@@ -296,13 +377,14 @@ function indentDisplayMathContent(line: string, indent: string): string {
   return `${indent.slice(leadingSpaces)}${line}`;
 }
 
-function findBracketDisplayClose(lines: string[], startIndex: number): number {
+function findBracketDisplayClose(lines: string[], startIndex: number, hasProtected: (line: string) => boolean): number {
   for (let index = startIndex; index < lines.length; index++) {
     const line = lines[index];
     if (/^ {0,3}\\\][ \t]*$/.test(line)) return index;
 
     // Do not pair delimiters across another Markdown block boundary.
     if (
+      hasProtected(line) ||
       /^ {0,3}(`{3,}|~{3,})/.test(line) ||
       /^ {0,3}\\\[[ \t]*$/.test(line) ||
       /<(code|pre|script|style)\b/i.test(line)
@@ -314,25 +396,7 @@ function findBracketDisplayClose(lines: string[], startIndex: number): number {
   return -1;
 }
 
-function updateInlineCodeMarker(line: string, initialMarkerSize: number): number {
-  let markerSize = initialMarkerSize;
-  for (let cursor = 0; cursor < line.length;) {
-    if (line[cursor] !== "`") {
-      cursor++;
-      continue;
-    }
-
-    let end = cursor + 1;
-    while (line[end] === "`") end++;
-    const runSize = end - cursor;
-    if (markerSize === 0) markerSize = runSize;
-    else if (runSize === markerSize) markerSize = 0;
-    cursor = end;
-  }
-  return markerSize;
-}
-
-function normalizeInlineLatexMath(line: string): string {
+function normalizeInlineLatexMath(line: string, hasProtected: (text: string) => boolean): string {
   if (
     /^\s{0,3}\[[^\]]+\]:/.test(line) ||
     /]\s*\(/.test(line) ||
@@ -345,7 +409,10 @@ function normalizeInlineLatexMath(line: string): string {
 
   return line.replace(
     /(?<!\\)\\\(([^`\r\n$]+?)(?<!\\)\\\)/g,
-    (match, math: string) => (math.trim() ? `$${math}$` : match),
+    // Do not bridge a protected span: retaining the entire original pair
+    // avoids turning code into KaTeX input. Other complete pairs on this line
+    // can still normalize independently.
+    (match, math: string) => (math.trim() && !hasProtected(math) ? `$${math}$` : match),
   );
 }
 
@@ -364,11 +431,13 @@ const remarkGfmOptions = { singleTilde: false } as const;
 export const markdownRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [
   [remarkFrontmatter, ["yaml"]],
   [remarkGfm, remarkGfmOptions],
+  remarkCjkFriendly,
   remarkMath,
 ];
 export const markdownPreviewRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [
   [remarkFrontmatter, ["yaml"]],
   [remarkGfm, remarkGfmOptions],
+  remarkCjkFriendly,
   remarkMath,
 ];
 
