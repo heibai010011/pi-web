@@ -141,6 +141,35 @@ test("fresh sessions use the preference while persisted and live sessions restor
   assert.doesNotMatch(loadToolsSource, /setPreferredToolPreset/);
 });
 
+test("the selector prefers the live wrapper model over persisted response metadata", () => {
+  assert.match(source, /model\?: \{ provider: string; id: string \}/);
+  assert.match(source, /const currentModel = currentModelOverride \?\? liveModel \?\? data\?\.context\.model \?\? pendingModel \?\? null/);
+  assert.match(source, /syncLiveModel\(liveState\)/);
+  assert.match(source, /syncLiveModel\(state\);[\s\S]*?const busy = data\.running/);
+});
+
+test("late state responses cannot overwrite the live model after a run or session boundary", () => {
+  const promptSettlement = source.slice(
+    source.indexOf("const waitForPromptSettlement = useCallback"),
+    source.indexOf("const waitForBashSettlement = useCallback"),
+  );
+  const bashSettlement = source.slice(
+    source.indexOf("const waitForBashSettlement = useCallback"),
+    source.indexOf("const reconcileAgentState = useCallback"),
+  );
+  const agentEnd = source.slice(
+    source.indexOf('case "agent_end"'),
+    source.indexOf('case "agent_settled"'),
+  );
+
+  // The initial mount path omits runId, so capture it before the first await.
+  assert.match(promptSettlement, /runId = promptRunIdRef\.current/);
+  assert.match(promptSettlement, /await res\.json\(\)[\s\S]*?if \(!sessionHookMountedRef\.current \|\| sessionIdRef\.current !== sid[\s\S]*?promptRunIdRef\.current !== runId\)\) return;[\s\S]*?syncLiveModel\(state\)/);
+  assert.match(bashSettlement, /await res\.json\(\)[\s\S]*?if \(!sessionHookMountedRef\.current \|\| bashRecoveryIdRef\.current !== recoveryId[\s\S]*?sessionIdRef\.current !== sid\) return;\s*syncLiveModel\(data\.state\)/);
+  assert.match(agentEnd, /const sid = sessionIdRef\.current;\s*const runId = promptRunIdRef\.current;/);
+  assert.match(agentEnd, /\.then\(\(d: \{ state\?: AgentStateResponse \}\) => \{\s*if \(!sessionHookMountedRef\.current \|\| sessionIdRef\.current !== sid[\s\S]*?promptRunIdRef\.current !== runId\) return;\s*syncLiveModel\(d\.state\)/);
+});
+
 test("existing-session prompts rely on the persisted tool selection", () => {
   const sendSource = source.slice(
     source.indexOf("  const handleSend = useCallback"),

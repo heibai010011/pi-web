@@ -145,10 +145,14 @@ export async function DELETE(
     }
 
     // Read only the bounded header before deleting.
-    const parentHeader = readSessionHeader(filePath);
-    const parentSessionPath = parentHeader?.parentSession;
-    // The grandparent's id is needed to also fix pi-web:subagent metadata
-    // entries, which record parentSessionId separately from the header.
+    let parentSessionPath: string | undefined;
+    try {
+      parentSessionPath = readSessionHeader(filePath)?.parentSession;
+    } catch (error) {
+      // Empty runtime sessions have a cached path before their first disk write.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    // Keep the subagent metadata parent in sync with the session header.
     let parentSessionId: string | undefined;
     if (parentSessionPath) {
       try {
@@ -187,11 +191,13 @@ export async function DELETE(
     try {
       unlinkSync(filePath);
     } catch (error) {
-      const rollbackFailedIds = reparented.rollback();
-      return NextResponse.json({
-        error: String(error),
-        ...(rollbackFailedIds.length > 0 ? { rollbackFailedChildSessionIds: rollbackFailedIds } : {}),
-      }, { status: 500 });
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        const rollbackFailedIds = reparented.rollback();
+        return NextResponse.json({
+          error: String(error),
+          ...(rollbackFailedIds.length > 0 ? { rollbackFailedChildSessionIds: rollbackFailedIds } : {}),
+        }, { status: 500 });
+      }
     }
     invalidateSessionPathCache(id);
     invalidateSessionListCache();
