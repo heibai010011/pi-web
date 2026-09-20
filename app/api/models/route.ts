@@ -1,6 +1,6 @@
 import { stat } from "fs/promises";
 import { resolve } from "path";
-import { createAgentSessionServices, getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionServices, getAgentDir, ModelRegistry, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import {
   loadModelsWithCache,
@@ -8,6 +8,7 @@ import {
   withSafeModelLoadFailure,
   type ModelsData,
 } from "@/lib/models-cache";
+import { getImagesModels, imageCredentialsFromModelRegistry, listImageModels } from "@/lib/image-gen";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
@@ -75,6 +76,21 @@ async function loadModels(cwd: string): Promise<ModelsData> {
     defaultModel = { provider: initial.model.provider, modelId: initial.model.id };
   }
 
+  // Image-generation models: static pi-ai catalog filtered to providers with
+  // stored credentials. Failures degrade to an empty list — chat models must
+  // keep loading even when the images runtime misbehaves.
+  let imageModelList: { id: string; name: string; provider: string }[] = [];
+  try {
+    const registry = new ModelRegistry(services.modelRuntime);
+    const imagesModels = getImagesModels(imageCredentialsFromModelRegistry(registry));
+    imageModelList = (await listImageModels(
+      imagesModels,
+      (providerId) => Boolean(registry.getProviderAuthStatus(providerId)?.configured),
+    )).map((model) => ({ id: model.modelId, name: model.name, provider: model.provider }));
+  } catch (error) {
+    console.error("[pi-web] failed to list image models:", error instanceof Error ? error.message : error);
+  }
+
   return withModelRuntimeError(
     {
       models: Object.fromEntries(nameMap),
@@ -83,6 +99,7 @@ async function loadModels(cwd: string): Promise<ModelsData> {
       thinkingLevels,
       thinkingLevelMaps,
       thinkingLevelPins,
+      imageModelList,
       ...(warnings.length > 0 ? { modelScopeWarnings: warnings } : {}),
     },
     modelError,
@@ -96,6 +113,7 @@ const EMPTY_MODELS: ModelsData = {
   thinkingLevels: {},
   thinkingLevelMaps: {},
   thinkingLevelPins: {},
+  imageModelList: [],
 };
 
 export async function GET(req: Request) {

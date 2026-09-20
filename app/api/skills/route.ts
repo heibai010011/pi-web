@@ -30,10 +30,22 @@ export async function GET(req: Request) {
 
 // PATCH /api/skills — toggle disable-model-invocation on a SKILL.md file
 export async function PATCH(req: Request) {
+  let body: Record<string, unknown>;
   try {
-    const body = await req.json() as { filePath: string; disableModelInvocation: boolean };
-    const { filePath, disableModelInvocation } = body;
-    if (!filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
+    const parsed: unknown = await req.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return NextResponse.json({ error: "Body must be a JSON object" }, { status: 400 });
+    }
+    body = parsed as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  const { filePath, disableModelInvocation } = body;
+  if (typeof filePath !== "string" || !filePath.trim()) return NextResponse.json({ error: "filePath required" }, { status: 400 });
+  if (typeof disableModelInvocation !== "boolean") {
+    return NextResponse.json({ error: "disableModelInvocation must be a boolean" }, { status: 400 });
+  }
+  try {
     if (!existsSync(filePath)) return NextResponse.json({ error: "file not found" }, { status: 404 });
     const allowedRoots = new Set(await getAllowedFileRoots());
     allowedRoots.add(getAgentDir());

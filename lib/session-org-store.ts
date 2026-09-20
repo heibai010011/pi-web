@@ -33,11 +33,11 @@ export function getSessionOrgStorePath(): string {
 }
 
 function readStore(storePath: string): SessionOrgStore {
-  if (!existsSync(storePath)) return { version: STORAGE_VERSION, projects: {} };
+  if (!existsSync(storePath)) return { version: STORAGE_VERSION, projects: Object.create(null) as Record<string, unknown> };
   try {
     const parsed = JSON.parse(readFileSync(storePath, "utf8")) as unknown;
     if (!isRecord(parsed) || !isRecord(parsed.projects)) {
-      return { version: STORAGE_VERSION, projects: {} };
+      return { version: STORAGE_VERSION, projects: Object.create(null) as Record<string, unknown> };
     }
     // Null-prototype copy: a project key like "__proto__" must not leak
     // through Object.prototype or silently disappear on write.
@@ -45,7 +45,7 @@ function readStore(storePath: string): SessionOrgStore {
     return { version: STORAGE_VERSION, projects };
   } catch {
     // Corrupt file: start over rather than blocking the UI.
-    return { version: STORAGE_VERSION, projects: {} };
+    return { version: STORAGE_VERSION, projects: Object.create(null) as Record<string, unknown> };
   }
 }
 
@@ -112,7 +112,8 @@ export function migrateSessionOrgLegacyEntry(
   const normalized = normalizeSessionOrganization(legacy);
   if (!normalized) return;
   const store = readStore(storePath);
-  if (store.projects[projectKey]) return;
+  // Match readSessionOrgProjectEntry: malformed records are not authoritative.
+  if (normalizeSessionOrganization(store.projects[projectKey])) return;
   store.projects[projectKey] = normalized;
   writeStore(store, storePath);
 }

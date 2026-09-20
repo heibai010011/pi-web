@@ -31,8 +31,17 @@ function buildHeaders(api: string, apiKey: string | undefined, configured: Recor
 }
 
 export async function POST(req: Request) {
+  let body: Record<string, unknown>;
   try {
-    const body = await req.json() as { providerName?: unknown; provider?: unknown };
+    const parsed: unknown = await req.json();
+    if (!isRecord(parsed)) {
+      return NextResponse.json({ error: "Body must be a JSON object" }, { status: 400 });
+    }
+    body = parsed;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  try {
     const providerName = typeof body.providerName === "string" ? body.providerName.trim() : "";
     if (!providerName) return NextResponse.json({ error: "providerName is required" }, { status: 400 });
     if (!isRecord(body.provider)) return NextResponse.json({ error: "provider is required" }, { status: 400 });

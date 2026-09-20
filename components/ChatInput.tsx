@@ -8,7 +8,8 @@ import {
   clearDraft,
   getDraft,
   mergeRestoredSubmissionDraft,
-  mergeRestoredSubmissionText,
+  registerDraftRestoration,
+  restoreDraftSubmission,
   rekeyDraft as rekeyStoredDraft,
   setDraft,
   type ChatDraftImage,
@@ -28,6 +29,12 @@ import { useI18n } from "@/hooks/useI18n";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
 import type { ToolPreset } from "@/lib/tool-presets";
 import type { ChatStreamAnchorMode } from "@/lib/chat-lazy-load";
+import {
+  getImageGenPreferences,
+  setImageGenPreferences,
+  type ImageGenPreferences,
+} from "@/lib/image-gen-preferences";
+import { MAX_REFERENCE_IMAGES, type ImageComposerOptions } from "@/lib/image-gen-shared";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
 
 export { filterModelOptions } from "./ModelSelector";
@@ -84,6 +91,12 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
+  /** Image-generation composer support; omit to hide the mode switch entirely. */
+  imageModels?: ModelSelectorOption[];
+  imageModel?: { provider: string; modelId: string } | null;
+  onImageModelChange?: (provider: string, modelId: string) => void;
+  onImageGenerate?: (message: string, images: AttachedImage[], options: ImageComposerOptions) => void;
+  isGeneratingImage?: boolean;
 }
 
 export interface ChatInputHandle {
@@ -331,7 +344,6 @@ function draftImageToAttachedImage(image: ChatDraftImage): AttachedImage {
 function draftImagesToAttachedImages(images: ChatDraftImage[] | undefined): AttachedImage[] {
   return (images ?? [])
     .filter(isBase64ImageWithinLimits)
-    .slice(0, MAX_ATTACHED_IMAGES)
     .map(draftImageToAttachedImage);
 }
 
@@ -512,6 +524,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onPromptWithStreamingBehavior,
   draftKey,
   cwd,
+  imageModels,
+  imageModel,
+  onImageModelChange,
+  onImageGenerate,
+  isGeneratingImage,
   compact = false,
 }: Props, ref) {
   const { t } = useI18n();
@@ -549,6 +566,29 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     ? skillDormancyState.values
     : {};
 
+  // ── Image-generation composer mode ─────────────────────────────────────
+  const imageGenAvailable = Boolean(onImageGenerate && imageModels && imageModels.length > 0);
+  const [initialImageGenPreferences] = useState<ImageGenPreferences>(() => getImageGenPreferences());
+  const [imageMode, setImageMode] = useState(false);
+  const [imageAspectRatio, setImageAspectRatio] = useState<ImageGenPreferences["aspectRatio"]>(initialImageGenPreferences.aspectRatio);
+  const [imageCount, setImageCount] = useState<ImageGenPreferences["count"]>(initialImageGenPreferences.count);
+  const [imageSeed, setImageSeed] = useState<ImageGenPreferences["seed"]>(initialImageGenPreferences.seed);
+  const [imageSeedEditing, setImageSeedEditing] = useState(false);
+  useEffect(() => {
+    if (!onImageGenerate) return;
+    setImageGenPreferences({
+      model: imageModel ?? null,
+      aspectRatio: imageAspectRatio,
+      count: imageCount,
+      seed: imageSeed,
+    });
+  }, [onImageGenerate, imageModel, imageAspectRatio, imageCount, imageSeed]);
+  // A persisted selection may point at a model that no longer exists.
+  const imageModelValid = imageModel && imageModels?.some(
+    (m) => m.provider === imageModel.provider && m.modelId === imageModel.modelId,
+  );
+  const activeImageModel = imageModelValid ? imageModel : null;
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
@@ -568,8 +608,65 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
   const pendingImageCountRef = useRef(0);
+  const sendPendingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const draftOwnerRef = useRef({});
+  const draftPropRef = useRef(draftKey);
+  if (draftPropRef.current !== draftKey) {
+    // Imperative promotion already moved this same draft; navigation did not.
+    if (draftKeyRef.current !== draftKey) draftOwnerRef.current = {};
+    draftPropRef.current = draftKey;
+  }
+  const draftOwner = draftOwnerRef.current;
+  const maxImages = imageMode ? MAX_REFERENCE_IMAGES : MAX_ATTACHED_IMAGES;
+  const imageModeRef = useRef(imageMode);
+  imageModeRef.current = imageMode;
+  const streamingRef = useRef(isStreaming);
+  streamingRef.current = isStreaming;
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
+
+  const restorationCleanupRef = useRef<(() => void) | null>(null);
+  const initialStoredDraftRef = useRef<ReturnType<typeof getDraft> | undefined>(draftKey ? getDraft(draftKey) : null);
+
+  const restoreSubmission = useCallback((text: string, images?: ChatDraftImage[], targetDraftKey?: string) => {
+    if (!text.trim() && !images?.length) return;
+    const key = draftKeyRef.current;
+    const destination = targetDraftKey ?? key;
+    if (destination !== key) {
+      if (destination) restoreDraftSubmission(destination, text, images);
+      return;
+    }
+    const restored = mergeRestoredSubmissionDraft(text, images, valueRef.current, attachedImagesRef.current.map(imageToDraftImage));
+    const nextImages = images?.length
+      ? [...draftImagesToAttachedImages(images), ...attachedImagesRef.current]
+      : attachedImagesRef.current;
+    // Update the live snapshot before queued React work or another restoration.
+    valueRef.current = restored.value;
+    attachedImagesRef.current = nextImages;
+    if (key) setDraft(key, restored); // Never dispatch our own restoration again.
+    setValue(restored.value);
+    setAttachedImages(nextImages);
+    setAtQuery(null);
+    setHistoryMenuOpen(false);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      ta.style.height = "auto";
+      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    });
+  }, []);
+
+  const registerRestorationOwner = useCallback(() => {
+    restorationCleanupRef.current?.();
+    const key = draftKeyRef.current;
+    restorationCleanupRef.current = key ? registerDraftRestoration(key, (text, images) => {
+      restoreSubmission(text, images);
+      return { value: valueRef.current, images: attachedImagesRef.current.map(imageToDraftImage) };
+    }) : null;
+  }, [restoreSubmission]);
 
   useImperativeHandle(ref, () => ({
     insertIfEmpty(text: string) {
@@ -646,6 +743,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           && image.mimeType === currentDraft.images[index]?.mimeType
         ));
       draftKeyRef.current = nextKey;
+      registerRestorationOwner();
       if (unchanged) return;
 
       const movedImages = draftImagesToAttachedImages(moved.images);
@@ -659,70 +757,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       setAtQuery(null);
       setHistoryMenuOpen(false);
     },
-    restoreSubmission(text: string, images?: ChatDraftImage[], targetDraftKey?: string) {
-      if (!text.trim() && !images?.length) return;
-
-      // clearInput is queued before the submission handler runs. Compose with
-      // that queued state so a fast rejection cannot observe stale DOM text and
-      // then get overwritten by the clear.
-      const currentDraftKey = draftKeyRef.current;
-      const destinationDraftKey = targetDraftKey ?? currentDraftKey;
-      const targetsCurrentComposer = destinationDraftKey === currentDraftKey;
-      const storedDraft = !targetsCurrentComposer && destinationDraftKey
-        ? getDraft(destinationDraftKey)
-        : null;
-      const restoredDraft = mergeRestoredSubmissionDraft(
-        text,
-        images,
-        targetsCurrentComposer ? valueRef.current : (storedDraft?.value ?? ""),
-        targetsCurrentComposer
-          ? attachedImagesRef.current.map(imageToDraftImage)
-          : (storedDraft?.images ?? []),
-      );
-      // The first optimistic message switches ChatWindow out of its empty-state
-      // layout and remounts this component. Persist synchronously so recovery is
-      // not lost if this instance is the one being unmounted.
-      if (destinationDraftKey) setDraft(destinationDraftKey, restoredDraft);
-      if (!targetsCurrentComposer) return;
-      const restoredImages = images?.length
-        ? [
-            ...draftImagesToAttachedImages(images).slice(
-              0,
-              Math.max(0, MAX_ATTACHED_IMAGES - attachedImagesRef.current.length),
-            ),
-            ...attachedImagesRef.current,
-          ].slice(0, MAX_ATTACHED_IMAGES)
-        : attachedImagesRef.current;
-      // Session promotion can rekey this composer before React flushes the
-      // functional updates below, so update the imperative snapshot first.
-      valueRef.current = restoredDraft.value;
-      attachedImagesRef.current = restoredImages;
-      setValue((current) => {
-        const restored = mergeRestoredSubmissionText(text, current);
-        valueRef.current = restored;
-        return restored;
-      });
-      setAtQuery(null);
-      setHistoryMenuOpen(false);
-      if (images?.length) {
-        setAttachedImages((current) => {
-          const available = Math.max(0, MAX_ATTACHED_IMAGES - current.length);
-          const restored = draftImagesToAttachedImages(images)
-            .slice(0, available);
-          const next = restored.length > 0 ? [...restored, ...current] : current;
-          attachedImagesRef.current = next;
-          return next;
-        });
-      }
-      requestAnimationFrame(() => {
-        const ta = textareaRef.current;
-        if (!ta) return;
-        ta.focus();
-        ta.setSelectionRange(ta.value.length, ta.value.length);
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-      });
-    },
+    restoreSubmission,
     insertText(text: string) {
       const ta = textareaRef.current;
       if (!ta) {
@@ -756,7 +791,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (compact) return;
     const remaining = Math.max(
       0,
-      MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
+      maxImages - attachedImagesRef.current.length - pendingImageCountRef.current,
     );
     const imageFiles = files
       .filter((f) => f.type.startsWith("image/") && f.size <= MAX_ATTACHED_IMAGE_BYTES)
@@ -771,7 +806,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }))
       );
       setAttachedImages((prev) => {
-        const accepted = newImages.slice(0, Math.max(0, MAX_ATTACHED_IMAGES - prev.length));
+        const accepted = newImages.slice(0, Math.max(0, (imageModeRef.current ? MAX_REFERENCE_IMAGES : MAX_ATTACHED_IMAGES) - prev.length));
         newImages.slice(accepted.length).forEach(revokeImagePreview);
         const next = [...prev, ...accepted];
         attachedImagesRef.current = next;
@@ -780,16 +815,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     } finally {
       pendingImageCountRef.current -= imageFiles.length;
     }
-  }, [compact]);
+  }, [compact, maxImages]);
 
   const removeImage = useCallback((index: number) => {
-    setAttachedImages((prev) => {
-      const next = [...prev];
-      const [removed] = next.splice(index, 1);
-      if (removed) revokeImagePreview(removed);
-      attachedImagesRef.current = next;
-      return next;
-    });
+    const next = [...attachedImagesRef.current];
+    const [removed] = next.splice(index, 1);
+    if (removed) revokeImagePreview(removed);
+    attachedImagesRef.current = next;
+    setAttachedImages(next);
   }, []);
 
   const clearImages = useCallback(() => {
@@ -816,12 +849,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   useEffect(() => {
     if (!draftKey || draftKeyRef.current !== draftKey) return;
     setDraft(draftKey, {
-      value,
-      images: attachedImages.map(imageToDraftImage),
+      value: valueRef.current,
+      images: attachedImagesRef.current.map(imageToDraftImage),
     });
   }, [attachedImages, draftKey, value]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previousDraftKey = draftKeyRef.current;
     if (previousDraftKey === draftKey) return;
 
@@ -847,6 +880,27 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, [draftKey]);
 
+  useLayoutEffect(function registerDraftRestorationEffect() {
+    // A response may restore to the Map after render initialized state but
+    // before this mount has registered. Hydrate that committed snapshot once.
+    if (initialStoredDraftRef.current !== undefined) {
+      const stored = draftKeyRef.current ? getDraft(draftKeyRef.current) : null;
+      if (JSON.stringify(stored) !== JSON.stringify(initialStoredDraftRef.current)) {
+        const nextImages = draftImagesToAttachedImages(stored?.images);
+        valueRef.current = stored?.value ?? "";
+        attachedImagesRef.current = nextImages;
+        setValue(valueRef.current);
+        setAttachedImages(nextImages);
+      }
+      initialStoredDraftRef.current = undefined;
+    }
+    registerRestorationOwner();
+    return () => {
+      restorationCleanupRef.current?.();
+      restorationCleanupRef.current = null;
+    };
+  }, [draftKey, registerRestorationOwner]);
+
   const resizeTextarea = useCallback(() => {
     const ta = textareaRef.current;
     if (!ta) return;
@@ -871,7 +925,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [resizeTextarea]);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       attachedImagesRef.current.forEach(revokeImagePreview);
     };
   }, []);
@@ -879,29 +935,65 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const runBuiltinCommand = useCallback(async (msg: string): Promise<boolean> => {
     if (attachedImages.length || !msg.startsWith("/") || !onBuiltinCommand) return false;
     if (builtinCommandPendingRef.current) return true;
+    const owner = draftOwnerRef.current;
+    const input = valueRef.current;
+    const images = attachedImagesRef.current;
     builtinCommandPendingRef.current = true;
     setBuiltinCommandPending(true);
     try {
       const result = await onBuiltinCommand(msg);
       if (!result.handled) return false;
-      if (!result.error && canClearBuiltinCommandInput(valueRef.current, attachedImagesRef.current.length, msg)) clearInput();
+      if (!result.error && mountedRef.current && draftOwnerRef.current === owner
+        && valueRef.current === input && attachedImagesRef.current === images
+        && canClearBuiltinCommandInput(valueRef.current, attachedImagesRef.current.length, msg)) clearInput();
       return true;
     } finally {
       builtinCommandPendingRef.current = false;
-      setBuiltinCommandPending(false);
+      if (mountedRef.current) setBuiltinCommandPending(false);
     }
   }, [attachedImages.length, clearInput, onBuiltinCommand]);
 
   const handleSend = useCallback(async () => {
+    // Reject stale render callbacks, rather than silently sending the latest draft.
+    if (sendPendingRef.current || !mountedRef.current || draftOwnerRef.current !== draftOwner
+      || valueRef.current !== value || attachedImagesRef.current !== attachedImages
+      || imageModeRef.current !== imageMode || attachedImages.length > maxImages) return;
     const msg = value.trim();
     if (!msg && !attachedImages.length) return;
-    onAudioUnlock?.();
-    const builtinAllowed = !isStreaming || canRunBuiltinSlashCommandWhileStreaming(msg);
-    if (builtinAllowed && await runBuiltinCommand(msg)) return;
-    if (isStreaming) return;
-    clearInput();
-    onSend(msg, attachedImages.length ? attachedImages : undefined);
-  }, [value, attachedImages, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+    const owner = draftOwnerRef.current;
+    const images = attachedImages.map((image) => ({ image, data: image.data, mimeType: image.mimeType, previewUrl: image.previewUrl }));
+    const ownsDraft = () => mountedRef.current && draftOwnerRef.current === owner
+      && valueRef.current === value && imageModeRef.current === imageMode
+      && attachedImagesRef.current === attachedImages
+      && attachedImagesRef.current.length === images.length
+      && images.every((snapshot, index) => {
+        const current = attachedImagesRef.current[index];
+        return current === snapshot.image && current.data === snapshot.data
+          && current.mimeType === snapshot.mimeType && current.previewUrl === snapshot.previewUrl;
+      });
+    // Acquire before the first await (including ordinary non-command sends).
+    sendPendingRef.current = true;
+    try {
+      onAudioUnlock?.();
+      if (imageMode) {
+        if (isStreaming || isGeneratingImage || !onImageGenerate || !activeImageModel || !ownsDraft()) return;
+        clearInput();
+        onImageGenerate(msg, attachedImages.length ? attachedImages : [], {
+          aspectRatio: imageAspectRatio,
+          count: imageCount,
+          ...(imageSeed !== null ? { seed: imageSeed } : {}),
+        });
+        return;
+      }
+      const builtinAllowed = !isStreaming || canRunBuiltinSlashCommandWhileStreaming(msg);
+      if (builtinAllowed && await runBuiltinCommand(msg)) return;
+      if (isStreaming || streamingRef.current || !ownsDraft() || attachedImagesRef.current.length > maxImages) return;
+      clearInput();
+      onSend(msg, attachedImages.length ? attachedImages : undefined);
+    } finally {
+      sendPendingRef.current = false;
+    }
+  }, [value, attachedImages, draftOwner, maxImages, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock, imageMode, onImageGenerate, activeImageModel, isGeneratingImage, imageAspectRatio, imageCount, imageSeed]);
 
   const slashQuery = !compact && value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -936,7 +1028,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     ? t(slashQuery ? "chat.match" : "chat.command")
     : t(slashQuery ? "chat.matches" : "chat.commands", { count: filteredSlashCommands.length });
   const hasInputText = Boolean(value.trim());
-  const canQueueStreamingMessage = hasInputText || attachedImages.length > 0;
+  const overImageLimit = attachedImages.length > maxImages;
+  const canQueueStreamingMessage = !overImageLimit && (hasInputText || attachedImages.length > 0);
   // Warn when images are attached but the selected model is known not to accept
   // image input (#584), including a resolved default. Unknown models stay silent.
   const showImageUnsupportedWarning = (
@@ -1130,27 +1223,49 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, []);
 
-  const sendQueued = useCallback((mode: "steer" | "followup") => {
+  const sendQueued = useCallback(async (mode: "steer" | "followup") => {
+    // Like Send, a retained queue callback owns its render's draft, not a recovery
+    // that updated the imperative refs before React committed its setters.
+    if (sendPendingRef.current || !mountedRef.current || draftOwnerRef.current !== draftOwner
+      || valueRef.current !== value || attachedImagesRef.current !== attachedImages
+      || imageMode || imageModeRef.current !== imageMode
+      || attachedImages.length > MAX_ATTACHED_IMAGES) return;
     const msg = value.trim();
     if (!msg && !attachedImages.length) return;
-    onAudioUnlock?.();
-    if (!attachedImages.length && onBuiltinCommand && canRunBuiltinSlashCommandWhileStreaming(msg)) {
-      void runBuiltinCommand(msg);
-      return;
-    }
-    const streamingBehavior = mode === "steer" ? "steer" : "followUp";
-    if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
+    const owner = draftOwnerRef.current;
+    const images = attachedImages.map((image) => ({ image, data: image.data, mimeType: image.mimeType, previewUrl: image.previewUrl }));
+    const ownsDraft = () => mountedRef.current && draftOwnerRef.current === owner
+      && valueRef.current === value && imageModeRef.current === imageMode
+      && attachedImagesRef.current === attachedImages
+      && attachedImagesRef.current.length === images.length
+      && images.every((snapshot, index) => {
+        const current = attachedImagesRef.current[index];
+        return current === snapshot.image && current.data === snapshot.data
+          && current.mimeType === snapshot.mimeType && current.previewUrl === snapshot.previewUrl;
+      });
+    // Shared with Send, and acquired before external code can reenter or restore.
+    sendPendingRef.current = true;
+    try {
+      onAudioUnlock?.();
+      if (!ownsDraft()) return;
+      if (!attachedImages.length && onBuiltinCommand && canRunBuiltinSlashCommandWhileStreaming(msg)) {
+        await runBuiltinCommand(msg);
+        return;
+      }
+      const streamingBehavior = mode === "steer" ? "steer" : "followUp";
+      if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
+        clearInput();
+        onPromptWithStreamingBehavior(msg, streamingBehavior, attachedImages.length ? attachedImages : undefined);
+        return;
+      }
+      const send = mode === "steer" ? onSteer : onFollowUp;
+      if (!send) return;
       clearInput();
-      onPromptWithStreamingBehavior(msg, streamingBehavior, attachedImages.length ? attachedImages : undefined);
-      return;
+      send(msg, attachedImages.length ? attachedImages : undefined);
+    } finally {
+      sendPendingRef.current = false;
     }
-    clearInput();
-    if (mode === "steer" && onSteer) {
-      onSteer(msg, attachedImages.length ? attachedImages : undefined);
-    } else if (mode === "followup" && onFollowUp) {
-      onFollowUp(msg, attachedImages.length ? attachedImages : undefined);
-    }
-  }, [value, attachedImages, onBuiltinCommand, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, runBuiltinCommand]);
+  }, [value, attachedImages, draftOwner, imageMode, onBuiltinCommand, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, runBuiltinCommand]);
 
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = displayedSlashCommands.length - 1;
@@ -1322,14 +1437,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
       if (sendShortcut) {
         e.preventDefault();
-        if (isStreaming && (onSteer || onFollowUp)) {
+        if (!imageMode && isStreaming && (onSteer || onFollowUp)) {
           sendQueued((e.altKey && onFollowUp) || !onSteer ? "followup" : "steer");
         } else {
           handleSend();
         }
       }
     },
-    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
+    [imageMode, isMobile, isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
   );
 
   const handleInput = useCallback(() => {
@@ -1695,6 +1810,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             {compactError}
           </div>
         )}
+        {overImageLimit && (
+          <div role="alert" style={{ marginBottom: 8, padding: "7px 10px", border: "1px solid rgba(234,179,8,0.35)", borderRadius: 6, color: "var(--text)", fontSize: 12 }}>
+            {t("chat.imageOverLimit", { count: attachedImages.length, max: maxImages })}
+          </div>
+        )}
         {/* Image previews */}
         {attachedImages.length > 0 && (
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
@@ -1708,6 +1828,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 />
                 <button
                   onClick={() => removeImage(i)}
+                  aria-label={t("chat.removeImage", { index: i + 1 })}
                   style={{
                     position: "absolute", top: -4, right: -4,
                     width: 16, height: 16, borderRadius: "50%",
@@ -2107,7 +2228,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             onInput={handleInput}
             onPaste={handlePaste}
             placeholder={
-              isStreaming && (onSteer || onFollowUp)
+              imageMode
+                ? t("chat.imageGenPlaceholder")
+                : isStreaming && (onSteer || onFollowUp)
                 ? t("chat.steerPlaceholder")
                 : isStreaming ? t("chat.agentPlaceholder")
                 : t("chat.messagePlaceholder")
@@ -2185,32 +2308,99 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           ) : (
             <button
               onClick={handleSend}
-              disabled={!value.trim() && !attachedImages.length}
+              disabled={overImageLimit || (!value.trim() && !attachedImages.length) || isGeneratingImage}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
                 display: "flex", alignItems: "center", gap: 6,
                 padding: "7px 14px",
-                background: (value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
+                background: !overImageLimit && (value.trim() || attachedImages.length) && !isGeneratingImage ? "var(--accent)" : "var(--bg-panel)",
                 border: "none",
                 borderRadius: 8,
-                color: (value.trim() || attachedImages.length) ? "var(--accent-contrast)" : "var(--text-dim)",
-                cursor: (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
+                color: !overImageLimit && (value.trim() || attachedImages.length) && !isGeneratingImage ? "var(--accent-contrast)" : "var(--text-dim)",
+                cursor: !overImageLimit && (value.trim() || attachedImages.length) && !isGeneratingImage ? "pointer" : "not-allowed",
                 fontSize: 13,
                 fontWeight: 600,
                 letterSpacing: "-0.01em",
-                boxShadow: (value.trim() || attachedImages.length) ? "0 1px 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
+                boxShadow: !overImageLimit && (value.trim() || attachedImages.length) && !isGeneratingImage ? "0 1px 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
                 transition: "background 0.15s, box-shadow 0.15s",
               }}
             >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="2" y1="7" x2="11" y2="7" />
-                <polyline points="7.5 3 12 7 7.5 11" />
-              </svg>
-              {t("chat.send")}
+              {isGeneratingImage && imageMode ? (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" style={{ animation: "spin 0.8s linear infinite", flexShrink: 0 }} aria-hidden="true">
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="2" y1="7" x2="11" y2="7" />
+                  <polyline points="7.5 3 12 7 7.5 11" />
+                </svg>
+              )}
+              {imageMode ? t("chat.imageGenSend") : t("chat.send")}
             </button>
           )}
           </div>
+
+          {/* Image-generation parameter row */}
+          {imageMode && imageGenAvailable && (
+            <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 4, padding: "0 2px", fontSize: 11, color: "var(--text-muted)" }}>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 0.3, marginRight: 2 }}>
+                {t("chat.imageGenRatio")}
+              </span>
+              {(["1:1", "3:4", "4:3", "16:9", "9:16"] as const).map((ratio) => (
+                <button
+                  key={ratio}
+                  type="button"
+                  onClick={() => setImageAspectRatio(ratio)}
+                  aria-pressed={imageAspectRatio === ratio}
+                  className={`imgen-pill${imageAspectRatio === ratio ? " is-active" : ""}`}
+                >
+                  {ratio}
+                </button>
+              ))}
+              <span style={{ width: 1, height: 16, background: "var(--border)", margin: "0 4px" }} />
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 0.3, marginRight: 2 }}>
+                {t("chat.imageGenCount")}
+              </span>
+              {([1, 2, 4] as const).map((count) => (
+                <button
+                  key={count}
+                  type="button"
+                  onClick={() => setImageCount(count)}
+                  aria-pressed={imageCount === count}
+                  className={`imgen-pill${imageCount === count ? " is-active" : ""}`}
+                  style={{ fontVariantNumeric: "tabular-nums" }}
+                >
+                  {count}
+                </button>
+              ))}
+              <span style={{ width: 1, height: 16, background: "var(--border)", margin: "0 4px" }} />
+              {imageSeedEditing ? (
+                <input
+                  type="number"
+                  value={imageSeed ?? ""}
+                  onChange={(e) => {
+                    const raw = e.target.value.trim();
+                    setImageSeed(raw !== "" && Number.isFinite(Number(raw)) ? Math.floor(Number(raw)) : null);
+                  }}
+                  onBlur={() => setImageSeedEditing(false)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === "Escape") setImageSeedEditing(false); }}
+                  placeholder="seed"
+                  aria-label={t("chat.imageGenSeed")}
+                  className="imgen-seed-input"
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setImageSeedEditing(true)}
+                  className={`imgen-pill${imageSeed !== null ? " is-active" : ""}`}
+                  title={t("chat.imageGenSeedHint")}
+                >
+                  seed {imageSeed !== null ? imageSeed : "·"}
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Bash mode status label */}
@@ -2259,17 +2449,69 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 <polyline points="21 15 16 10 5 21" />
               </svg>
             </button>
-            {/* Model selector - visible always, disabled while the session or switch is busy */}
-            {(modelOptions.length > 0 || model || modelError) && onModelChange && (
-              <ModelSelector
-                options={modelOptions}
-                value={model}
-                onChange={onModelChange}
-                disabled={isStreaming}
-                busy={modelSwitching}
-                isAutoSelection={isAutoModelSelection}
-              />
+            {/* Mode switch: chat ↔ image generation */}
+            {imageGenAvailable && (
+              <div
+                role="group"
+                aria-label={t("chat.imageGenModeSwitch")}
+                style={{
+                  display: "flex",
+                  height: 32,
+                  margin: "0 2px 0 4px",
+                  border: "1px solid var(--border)",
+                  borderRadius: 9,
+                  overflow: "hidden",
+                  background: "var(--bg)",
+                  flexShrink: 0,
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => setImageMode(false)}
+                  aria-pressed={!imageMode}
+                  className={`imgen-mode-button${!imageMode ? " is-active" : ""}`}
+                >
+                  {t("chat.imageGenModeChat")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImageMode(true)}
+                  disabled={isStreaming}
+                  aria-pressed={imageMode}
+                  className={`imgen-mode-button${imageMode ? " is-active" : ""}`}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <polyline points="21 15 16 10 5 21" />
+                  </svg>
+                  {t("chat.imageGenModeImage")}
+                </button>
+              </div>
             )}
+            {/* Model selector - visible always, disabled while the session or switch is busy.
+                Image mode swaps in the image-model list with kind badges. */}
+            {imageMode && imageGenAvailable
+              ? (onImageModelChange && (
+                  <ModelSelector
+                    options={(imageModels ?? []).map((m) => ({ ...m, kind: "image" as const }))}
+                    value={activeImageModel}
+                    onChange={onImageModelChange}
+                    disabled={isStreaming || isGeneratingImage}
+                    ariaLabel={t("chat.imageGenModelSelector")}
+                  />
+                ))
+              : ((modelOptions.length > 0 || model || modelError) && onModelChange && (
+                  <ModelSelector
+                    options={modelOptions}
+                    value={model}
+                    onChange={onModelChange}
+                    disabled={isStreaming}
+                    busy={modelSwitching}
+                    isAutoSelection={isAutoModelSelection}
+                  />
+                ))
+            }
           </div>
 
           {/* spacer */}
@@ -2348,7 +2590,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 backdropFilter: "blur(10px)",
               } : null),
             }}>
-            {!isStreaming && onThinkingLevelChange && (
+            {!isStreaming && !modelSwitching && onThinkingLevelChange && (
               <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
                 <button
                   onClick={() => !isStreaming && setThinkingDropdownOpen((v) => !v)}

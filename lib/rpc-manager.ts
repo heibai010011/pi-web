@@ -1,5 +1,6 @@
+import { parsePromptRequestId, promptCancellation, PromptCancellationError } from "./prompt-cancellation";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, ModelRegistry, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
@@ -45,6 +46,9 @@ import type { DeletionSessionInfo } from "./session-delete-lineage";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
+import { createImageGenerationExtension } from "./image-gen-extension";
+import { getImagesModels, imageCredentialsFromModelRegistry, runImageGeneration } from "./image-gen";
+import { appendImageGenerationTurn, parseImageGenerateCommand } from "./image-generation-session";
 import {
   appendSessionToolSelection,
   readSessionToolSelection,
@@ -118,6 +122,7 @@ type AgentSessionWrapperOptions = {
   chatOnly?: boolean;
   onAgentRunComplete?: AgentRunCompleteListener;
   suppressCompletionNotifications?: boolean;
+  generateImage?: (request: import("./image-gen").ImageGenerationRequest, signal: AbortSignal) => Promise<import("./image-gen").ImageGenerationOutcome>;
 };
 
 const IDLE_RESET_EVENT_TYPES = new Set([
@@ -233,9 +238,15 @@ export class AgentSessionWrapper {
   private pendingPrompts = new Set<Promise<void>>();
   private commandDrainWaiters: Array<() => void> = [];
   private activeMutatingCommands = 0;
+  private imageAbortController: AbortController | null = null;
+  private imageCompletion: Promise<void> | null = null;
+  private readonly generateImage: NonNullable<AgentSessionWrapperOptions["generateImage"]>;
   private sessionReplacement: "fork" | "clone" | null = null;
   private agentRunNeedsCompletion = false;
   private promptAdmissionTail: Promise<void> = Promise.resolve();
+  readonly promptCancellationVersion = 1;
+  private correlatedOwner: { id: string; abort?: Promise<void> } | null = null;
+  private cancellationDrain: Promise<void> = Promise.resolve();
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
   private extensionBindingError: unknown = null;
@@ -255,6 +266,12 @@ export class AgentSessionWrapper {
     public readonly inner: AgentSessionLike,
     options: AgentSessionWrapperOptions = {},
   ) {
+    this.generateImage = options.generateImage ?? ((request, signal) => {
+      const registry = new ModelRegistry(
+        this.inner.modelRuntime as ConstructorParameters<typeof ModelRegistry>[0],
+      );
+      return runImageGeneration(getImagesModels(imageCredentialsFromModelRegistry(registry)), request, signal);
+    });
     this.exactSystemPrompt = options.exactSystemPrompt;
     this.chatOnly = options.chatOnly ?? false;
     this.onAgentRunComplete = options.onAgentRunComplete;
@@ -288,7 +305,7 @@ export class AgentSessionWrapper {
   }
 
   isRunning(): boolean {
-    return this._alive && (this.pendingPromptCount > 0 || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
+    return this._alive && (this.imageAbortController !== null || this.pendingPromptCount > 0 || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
   }
 
   isChatOnly(): boolean {
@@ -528,7 +545,8 @@ export class AgentSessionWrapper {
   }
 
   private isSessionRunningForReplacement(): boolean {
-    return this.inner.isBashRunning
+    return this.imageAbortController !== null
+      || this.inner.isBashRunning
       || this.inner.isStreaming
       || this.inner.isCompacting
       || this.pendingPromptCount > 0;
@@ -549,7 +567,32 @@ export class AgentSessionWrapper {
     assertSessionNotDeleting(this.sessionId);
     if (this.deletionPending || !this._alive) throw new Error("Session is no longer available");
     const type = command.type as string;
+    const requestId = parsePromptRequestId(command.promptRequestId);
+    if (requestId && type !== "prompt" && type !== "abort") throw new PromptCancellationError("promptRequestId is only supported for prompt/abort", 400);
+    if (requestId && command.streamingBehavior !== undefined) throw new PromptCancellationError("Correlated prompts cannot use streamingBehavior", 400);
+    if (requestId && type === "abort") {
+      // Record before any extension/startup wait. Never interrupt a different owner.
+      promptCancellation.cancel(this.sessionId, requestId);
+      const owner = this.correlatedOwner;
+      if (!owner || owner.id !== requestId) return null;
+      if (!owner.abort) {
+        owner.abort = (async () => {
+          this.extensionUiAbortController.abort(new DOMException("Prompt request canceled", "AbortError"));
+          await this.inner.abort();
+        })();
+        // Install synchronously: admission cannot overtake a delayed abort continuation.
+        this.cancellationDrain = owner.abort.catch(() => {});
+      }
+      await owner.abort;
+      return null;
+    }
     const allowedDuringReplacement = COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT.has(type);
+    const assertImageIdle = () => {
+      if (this.imageAbortController && !allowedDuringReplacement && type !== "abort") {
+        throw new Error("Cannot change the session while image generation is running");
+      }
+    };
+    assertImageIdle();
     if (this.sessionReplacement && !allowedDuringReplacement) {
       throw new Error("Session is being copied to a new session");
     }
@@ -560,7 +603,13 @@ export class AgentSessionWrapper {
     const tracksMutation = !allowedDuringReplacement;
     if (tracksMutation) this.activeMutatingCommands += 1;
 
+    let correlationHandedToPrompt = false;
+    let correlationClaimed = false;
     try {
+      if (requestId && type === "prompt") {
+        promptCancellation.claim(this.sessionId, requestId);
+        correlationClaimed = true;
+      }
       // Status reconciliation must not postpone forced cleanup after Stop.
       if (type !== "get_state") this.resetIdleTimer();
       if (this.shouldWaitForExtensions(type)) await this.waitForExtensionsBound();
@@ -568,6 +617,9 @@ export class AgentSessionWrapper {
       if (this.sessionReplacement && !allowedDuringReplacement) {
         throw new Error("Session is being copied to a new session");
       }
+
+      assertImageIdle();
+      if (this.deletionPending || this.shutdownPromise || !this._alive) throw new Error("Session is no longer available");
 
       if (type === "prompt" || type === "steer" || type === "follow_up") {
         const imageError = validateAgentImages(command.images);
@@ -581,7 +633,17 @@ export class AgentSessionWrapper {
         // this submission starts a run or joins its streaming queue.
         const releaseAdmission = await this.acquirePromptAdmission();
         try {
+          await this.cancellationDrain;
           assertSessionNotDeleting(this.sessionId);
+          if (this.correlatedOwner && command.streamingBehavior === undefined) {
+            throw new PromptCancellationError("Session already has an active prompt");
+          }
+          if (requestId) {
+            promptCancellation.check(this.sessionId, requestId);
+            if (this.correlatedOwner || this.pendingPromptCount || this.inner.isStreaming || this.inner.isCompacting) {
+              throw new PromptCancellationError("Session already has an active prompt");
+            }
+          }
           if (this.inner.isBashRunning) {
             throw new Error("Cannot send a prompt while a shell command is running");
           }
@@ -590,6 +652,9 @@ export class AgentSessionWrapper {
           }
           const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
           const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
+          const owner = requestId ? { id: requestId } : null;
+          if (owner) this.correlatedOwner = owner;
+          correlationHandedToPrompt = Boolean(owner);
           let preflightAccepted = false;
           let preflightSettled = false;
           let promptSettled = false;
@@ -612,6 +677,8 @@ export class AgentSessionWrapper {
           const finishPrompt = () => {
             if (promptSettled) return;
             promptSettled = true;
+            if (owner && this.correlatedOwner === owner) this.correlatedOwner = null;
+            if (requestId) promptCancellation.finish(this.sessionId, requestId);
             this.pendingPromptCount = Math.max(0, this.pendingPromptCount - 1);
             this.resetIdleTimer();
             this.notifyAgentRunCompleteIfIdle();
@@ -629,6 +696,9 @@ export class AgentSessionWrapper {
                 // validation and extension preflight have accepted the submission.
                 preflightResult: (success) => {
                   if (success) {
+                    // SDK awaits input/extension hooks before this callback; throwing
+                    // here prevents a canceled preflight from starting the agent.
+                    if (requestId) promptCancellation.check(this.sessionId, requestId);
                     this.applyExactSystemPrompt();
                     acceptPreflight();
                   }
@@ -645,6 +715,10 @@ export class AgentSessionWrapper {
           void prompt.then(() => {
             // Compatibility fallback if a future SDK resolves without invoking
             // the internal callback. This waits for the run, but never acks early.
+            if (requestId && !preflightAccepted) {
+              try { promptCancellation.check(this.sessionId, requestId); }
+              catch (error) { rejectPreflight(error); finishPrompt(); return; }
+            }
             acceptPreflight();
             finishPrompt();
             if (!streamingBehavior) this.emit({ type: "prompt_done" });
@@ -679,7 +753,9 @@ export class AgentSessionWrapper {
         this.forceShutdownOnIdle = true;
         // Stop must unwind extension commands that have not started the agent yet.
         this.extensionUiAbortController.abort(new DOMException("Extension UI cancelled by Stop", "AbortError"));
+        this.imageAbortController?.abort(new DOMException("Image generation cancelled by Stop", "AbortError"));
         try {
+          await this.imageCompletion;
           await this.withFinalIdleReset(() => this.inner.abort());
           return null;
         } finally {
@@ -693,6 +769,7 @@ export class AgentSessionWrapper {
           sessionId: this.inner.sessionId,
           sessionFile: this.inner.sessionFile ?? "",
           isStreaming: this.inner.isStreaming,
+          isGeneratingImage: this.imageAbortController !== null,
           isPromptRunning: this.pendingPromptCount > 0,
           isBashRunning: this.inner.isBashRunning,
           isCompacting: this.inner.isCompacting,
@@ -1004,10 +1081,60 @@ export class AgentSessionWrapper {
         return null;
       }
 
+      case "image_generate": {
+        // Direct composer-mode generation: runs outside the agent loop but
+        // writes back through the same SessionManager persistence path, so
+        // history, branches, export, and the next chat turn all see the turn.
+        if (this.isSessionRunningForReplacement() || this.activeMutatingCommands > 1) {
+          throw new Error("Cannot generate images while the session is busy");
+        }
+        const { input, request } = parseImageGenerateCommand(command);
+        const controller = new AbortController();
+        this.imageAbortController = controller;
+        let finishImage!: () => void;
+        this.imageCompletion = new Promise<void>((resolve) => { finishImage = resolve; });
+        this.emit({ type: "image_generation_start" });
+        try {
+          const outcome = await this.generateImage(request, controller.signal);
+          // A provider may resolve successfully after cancellation. Never let a
+          // stale completion append through a disposed or deletion-fenced writer.
+          if (controller.signal.aborted || !this._alive || this.deletionPending || isSessionDeletionBlocked(this.sessionId)) {
+            return { ok: false, stopReason: "aborted" };
+          }
+          const ids = appendImageGenerationTurn(this.inner.sessionManager, {
+            ...input,
+            request,
+            result: outcome.result,
+            durationMs: outcome.durationMs,
+          });
+          if (this.inner.agent.state) {
+            this.inner.agent.state.messages = this.inner.sessionManager.buildSessionContext().messages;
+          }
+          invalidateSessionListCache();
+          return {
+            ok: outcome.result.stopReason !== "error",
+            stopReason: outcome.result.stopReason,
+            ...(outcome.result.errorMessage ? { errorMessage: outcome.result.errorMessage } : {}),
+            entryIds: ids,
+          };
+        } catch (error) {
+          if (controller.signal.aborted) return { ok: false, stopReason: "aborted" };
+          throw error;
+        } finally {
+          this.imageAbortController = null;
+          this.imageCompletion = null;
+          finishImage();
+          invalidateSessionListCache();
+          this.emit({ type: "image_generation_end" });
+          this.resetIdleTimer();
+        }
+      }
+
         default:
           throw new Error(`Unsupported command: ${type}`);
       }
     } finally {
+      if (requestId && correlationClaimed && !correlationHandedToPrompt) promptCancellation.finish(this.sessionId, requestId);
       if (tracksMutation) this.activeMutatingCommands = Math.max(0, this.activeMutatingCommands - 1);
       if (this.activeMutatingCommands === 0) {
         for (const resolve of this.commandDrainWaiters.splice(0)) resolve();
@@ -1018,6 +1145,7 @@ export class AgentSessionWrapper {
   destroy(): void {
     if (!this._alive) return;
     this._alive = false;
+    this.imageAbortController?.abort(new DOMException("Session destroyed", "AbortError"));
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.inner.isBashRunning) this.inner.abortBash();
     this.unsubscribe?.();
@@ -1069,6 +1197,7 @@ export class AgentSessionWrapper {
     this.deletionPending = true;
     this.agentRunNeedsCompletion = false;
     this.extensionUiAbortController.abort(new DOMException("Session deleted", "AbortError"));
+    this.imageAbortController?.abort(new DOMException("Session deleted", "AbortError"));
     this.inner.abortBash();
     await this.inner.abort();
     await Promise.allSettled([...this.pendingPrompts]);
@@ -1084,6 +1213,8 @@ export class AgentSessionWrapper {
 
     this.shutdownPromise = (async () => {
       try {
+        this.imageAbortController?.abort(new DOMException("Session shutting down", "AbortError"));
+        await this.imageCompletion;
         try {
           await this.waitForExtensionsBound();
         } catch (error) {
@@ -2094,6 +2225,7 @@ export async function startRpcSession(
                 cwd: sessionCwd,
                 settings: settingsManager,
               }),
+              createImageGenerationExtension(),
               createSubagentExtension(
                 SUBAGENT_CONTROLLER.extensionRuntime,
                 () => listSubagentProfiles(sessionCwd),

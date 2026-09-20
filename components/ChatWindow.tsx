@@ -274,10 +274,11 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const [restoreAnchorReady, setRestoreAnchorReady] = useState(false);
 
   const {
-    loading, error, messages, entryIds, historyCursor, hasEarlierMessages, streamState,
+    loading, error, messages, entryIds, historyCursor, hasEarlierMessages, branchNavigationBlocked, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
+    imageModelList, imageModel, handleImageModelChange, isGeneratingImage, handleImageGenerate,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput, setNoticePaused,
     isAutoModelSelection,
@@ -297,7 +298,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
     deferInitialScroll: Boolean(pendingScrollRestore),
   });
-  const sessionBusy = agentRunning || bashRunning;
+  const sessionBusy = agentRunning || bashRunning || isGeneratingImage;
+  const reuseImagePrompt = useCallback((prompt: string) => {
+    chatInputRef?.current?.restoreSubmission(prompt);
+  }, [chatInputRef]);
   const permissionRequest = extensionDialog
     && (extensionDialog.method === "select" || extensionDialog.method === "input")
     && isPermissionSystemPromptTitle(extensionDialog.title)
@@ -639,10 +643,14 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   useEffect(() => {
     const sentinel = sentinelRef.current;
     const container = scrollContainerRef.current;
-    if (!sentinel || !container) return;
+    // A fresh observer retries a still-visible sentinel after branch completion,
+    // including shared-ancestor branches whose pagination cursor did not change.
+    if (!sentinel || !container || branchNavigationBlocked) return;
+    let disposed = false;
+    let ownsPageLoad = false;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (!entries[0]?.isIntersecting) return;
+        if (disposed || !entries[0]?.isIntersecting) return;
         // No older history loaded yet: fetch the previous page from the server
         // and prepend it (loadContext handles prepend + scroll anchoring).
         // Skip while a page is already loading or nothing older exists.
@@ -653,16 +661,25 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         const sid = session?.id ?? sessionIdRef.current;
         if (!sid) return;
         loadingOlderRef.current = true;
+        ownsPageLoad = true;
         prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
         void loadContext(sid, activeLeafId, oldestId).finally(() => {
+          if (disposed) return;
+          ownsPageLoad = false;
           loadingOlderRef.current = false;
         });
       },
       { root: container, threshold: 0 }
     );
     observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [historyCursor, hasEarlierMessages, session, activeLeafId, loadContext, sessionIdRef, scrollContainerRef]);
+    return () => {
+      disposed = true;
+      observer.disconnect();
+      // A branch invalidates this page's reload ticket. Do not let its pending
+      // request block the new observer, or its late finally release a newer page.
+      if (ownsPageLoad) loadingOlderRef.current = false;
+    };
+  }, [historyCursor, hasEarlierMessages, branchNavigationBlocked, session, activeLeafId, loadContext, sessionIdRef, scrollContainerRef]);
 
   // Keep the rendered window at least as large as what's loaded, so prepended
   // (older) pages stay visible instead of being sliced off the top.
@@ -906,6 +923,11 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? newSessionDraftKey ?? undefined}
       cwd={session?.cwd ?? newSessionCwd}
+      imageModels={imageModelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }))}
+      imageModel={imageModel}
+      onImageModelChange={handleImageModelChange}
+      onImageGenerate={handleImageGenerate}
+      isGeneratingImage={isGeneratingImage}
     />
   );
 
@@ -1070,6 +1092,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                     writtenFiles={options.writtenFiles}
+                    onReuseImagePrompt={reuseImagePrompt}
                   />
                 );
                 if (!isVisible || currentRefIdx === undefined) return view;

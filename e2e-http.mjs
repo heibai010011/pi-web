@@ -1,15 +1,15 @@
-// Sandbox-adapted browser regression suite (HTTP + SSR level).
-// The full Playwright e2e (e2e/run.mjs) needs a forked Next dev-server child
-// and a real browser — both impossible here (spawn EPERM). This suite
-// reproduces run.mjs's API assertions 1:1 against an in-process HTTP harness
-// that calls the real route handlers, plus SSR smoke of the merged UI parts.
+// In-process HTTP regression suite with temporary session fixtures.
+// Calls real route handlers without starting a Next server or browser.
+// HTML export also exercises the SDK CLI child process, so spawning must be
+// available. Browser/SSR coverage lives in e2e/run.mjs and component tests.
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 
-const root = new URL(".", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const root = fileURLToPath(new URL(".", import.meta.url));
 const agentDir = mkdtempSync(join(tmpdir(), "pi-web-http-e2e-"));
 const project = join(agentDir, "project");
 const sessionDir = join(agentDir, "sessions", "e2e");
@@ -148,20 +148,52 @@ try {
     assert.ok(orgRes, "GET handler exists");
     assert.equal(orgRes.status, 200, JSON.stringify(orgRes));
   });
-} catch {
-  results.push("SKIP: session-org route not found at expected path");
+} catch (error) {
+  check("session-org route loads and runs", () => { throw error; });
 }
 
 // ---- export route (recursive-tree patch path) ----
-// The route prefers shelling out to the pi CLI (execFile) to export; that is
-// blocked by the sandbox (spawn EPERM), and its in-process fallback only
-// triggers when no CLI path exists. Assert the in-process fallback directly:
 try {
   const exportRoute = await jiti.import(join(root, "app/api/sessions/[id]/export/route.ts"));
-  const cliPath = await exportRoute.__testGetPiCliPath?.();
-  results.push(`SKIP: export via HTTP — route shells out to pi CLI (sandbox EPERM); cliPath=${cliPath ?? "none"}`);
-} catch {
-  results.push("SKIP: export route not importable");
+  const response = await exportRoute.GET(new Request(`http://localhost/api/sessions/${LONG}/export`), {
+    params: Promise.resolve({ id: LONG }),
+  });
+  const html = await response.text();
+  check("long session exports HTML with iterative tree helpers and safe headers", () => {
+    assert.equal(response.status, 200, html.slice(0, 1000));
+    assert.match(response.headers.get("content-type"), /text\/html/);
+    assert.match(response.headers.get("content-disposition"), /^attachment;/);
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("content-security-policy"), "frame-ancestors 'none'");
+    const encodedData = html.match(/<script[^>]*id="session-data"[^>]*>([\s\S]*?)<\/script>/)?.[1];
+    assert.ok(encodedData, "export contains embedded session data");
+    const sessionData = Buffer.from(encodedData.trim(), "base64").toString("utf8");
+    assert.ok(sessionData.includes("E2E message 4999"), "export includes the latest entry");
+    assert.ok(html.includes("function sortChildren(root)"));
+  });
+  const preview = await exportRoute.GET(new Request(`http://localhost/api/sessions/${BRANCH}/export?inline=1`), {
+    params: Promise.resolve({ id: BRANCH }),
+  });
+  const previewHtml = await preview.text();
+  check("inline session export preserves security headers and HTML", () => {
+    assert.equal(preview.status, 200, previewHtml.slice(0, 1000));
+    assert.match(preview.headers.get("content-disposition"), /^inline;/);
+    assert.match(preview.headers.get("content-type"), /text\/html/);
+    assert.equal(preview.headers.get("content-security-policy"), "frame-ancestors 'none'");
+    assert.equal(preview.headers.get("x-frame-options"), "DENY");
+    assert.equal(preview.headers.get("x-content-type-options"), "nosniff");
+    assert.ok(previewHtml.includes('id="session-data"'));
+  });
+  const missingExport = await exportRoute.GET(new Request("http://localhost/api/sessions/e2e-does-not-exist/export"), {
+    params: Promise.resolve({ id: "e2e-does-not-exist" }),
+  });
+  const missingExportBody = await missingExport.json();
+  check("unknown session export returns a JSON 404", () => {
+    assert.equal(missingExport.status, 404);
+    assert.deepEqual(missingExportBody, { error: "Session not found" });
+  });
+} catch (error) {
+  check("export route loads and runs", () => { throw error; });
 }
 
 console.log(results.join("\n"));

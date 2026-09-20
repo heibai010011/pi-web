@@ -6,6 +6,8 @@ export interface ModelsData {
   thinkingLevelMaps: Record<string, Record<string, string | null>>;
   /** `provider/modelId` → thinking level pinned by an `enabledModels` `:level` suffix. */
   thinkingLevelPins: Record<string, string>;
+  /** Image-generation models from pi-ai's ImagesModels catalog (auth-configured providers only). */
+  imageModelList?: { id: string; name: string; provider: string }[];
   modelError?: string;
   /** Warnings from resolving the `enabledModels` scope (e.g. a pattern matched nothing). */
   modelScopeWarnings?: string[];

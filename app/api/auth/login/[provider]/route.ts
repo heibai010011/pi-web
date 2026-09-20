@@ -20,9 +20,19 @@ export async function POST(
   { params }: { params: Promise<{ provider: string }> }
 ) {
   const { provider } = await params;
-  const { token, code } = (await req.json()) as { token?: string; code?: string };
+  let body: { token?: unknown; code?: unknown };
+  try {
+    const parsed: unknown = await req.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return Response.json({ error: "Body must be a JSON object" }, { status: 400 });
+    }
+    body = parsed;
+  } catch {
+    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  const { token, code } = body;
 
-  if (!token || !code) {
+  if (typeof token !== "string" || !token.trim() || typeof code !== "string" || !code.trim()) {
     return Response.json({ error: "token and code required" }, { status: 400 });
   }
 

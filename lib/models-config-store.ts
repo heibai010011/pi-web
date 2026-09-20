@@ -66,7 +66,8 @@ export function readModelsConfig(
 ): Record<string, unknown> {
   if (!existsSync(modelsPath)) return { providers: {} };
   try {
-    return JSON.parse(readFileSync(modelsPath, "utf8")) as Record<string, unknown>;
+    const parsed: unknown = JSON.parse(readFileSync(modelsPath, "utf8"));
+    return isRecord(parsed) ? parsed : { providers: {} };
   } catch {
     return { providers: {} };
   }
@@ -76,9 +77,10 @@ export function writeModelsConfig(
   data: Record<string, unknown>,
   modelsPath = getModelsConfigPath(),
 ): void {
+  const normalized = normalizeModelsConfigCosts(sanitizeModelsConfig(data));
+  const serialized = JSON.stringify(normalized, null, 2);
   const dir = dirname(modelsPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const normalized = normalizeModelsConfigCosts(sanitizeModelsConfig(data));
-  writePrivateFileAtomicSync(modelsPath, JSON.stringify(normalized, null, 2));
+  writePrivateFileAtomicSync(modelsPath, serialized);
   invalidateModelsCache();
 }

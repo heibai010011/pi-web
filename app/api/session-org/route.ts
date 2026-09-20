@@ -13,8 +13,17 @@ export async function GET(req: Request) {
 }
 
 export async function PUT(req: Request) {
+  let body: Record<string, unknown>;
   try {
-    const body = await req.json() as { projectKey?: unknown; org?: unknown };
+    const parsed: unknown = await req.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return NextResponse.json({ error: "Body must be a JSON object" }, { status: 400 });
+    }
+    body = parsed as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  try {
     const projectKey = typeof body.projectKey === "string" ? body.projectKey : null;
     if (!projectKey) {
       return NextResponse.json({ error: "projectKey is required" }, { status: 400 });

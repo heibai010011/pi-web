@@ -4,10 +4,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createJiti } from "jiti";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-
-const here = dirname(fileURLToPath(import.meta.url));
 const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
@@ -21,9 +17,9 @@ const render = (element) => renderToStaticMarkup(React.createElement(I18nProvide
 test("MarkdownBody renders merged markdown features", async () => {
   const mod = await jiti.import("./MarkdownBody.tsx");
   const MarkdownBody = typeof mod.default === "function" ? mod.default : mod.MarkdownBody;
-  const html = render(React.createElement(MarkdownBody, {
-    children: "# Heading\n\n**bold** and `code`\n\n```js\nconsole.log('E2E code');\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |",
-  }));
+  const html = render(React.createElement(MarkdownBody, null,
+    "# Heading\n\n**bold** and `code`\n\n```js\nconsole.log('E2E code');\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |",
+  ));
   assert.match(html, /<h[12][^>]*>Heading</);
   assert.match(html, /<strong>bold<\/strong>/);
   // The code block renders through the syntax highlighter, which splits

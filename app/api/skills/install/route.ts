@@ -18,9 +18,25 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
   }
 
+  let body: Record<string, unknown>;
   try {
-    const { package: pkg, scope, cwd } = await req.json() as { package?: string; scope?: string; cwd?: string };
-    if (!pkg?.trim()) return NextResponse.json({ error: "package required" }, { status: 400 });
+    const parsed: unknown = await req.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return NextResponse.json({ error: "Body must be a JSON object" }, { status: 400 });
+    }
+    body = parsed as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  const { package: pkg, scope, cwd } = body;
+  if (typeof pkg !== "string" || !pkg.trim()) return NextResponse.json({ error: "package required" }, { status: 400 });
+  if (scope !== undefined && scope !== "global" && scope !== "project") {
+    return NextResponse.json({ error: "scope must be global or project" }, { status: 400 });
+  }
+  if (cwd !== undefined && (typeof cwd !== "string" || !cwd.trim())) {
+    return NextResponse.json({ error: "cwd must be a non-empty string" }, { status: 400 });
+  }
+  try {
 
     const isGlobal = scope !== "project";
     if (!isGlobal) {

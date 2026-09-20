@@ -16,6 +16,7 @@ import { TurnWrittenFiles } from "./TurnWrittenFiles";
 import type { WrittenFile } from "@/lib/turn-written-files";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import type { SubagentToolDetails } from "@/lib/subagent-extension";
+import { IMAGE_GEN_TOOL_NAME, isImageGenerationToolDetails } from "@/lib/image-gen-shared";
 import type {
   AgentMessage,
   UserMessage,
@@ -197,6 +198,8 @@ interface Props {
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
+  /** Restores an image prompt into the composer (image result card action). */
+  onReuseImagePrompt?: (prompt: string) => void;
   /**
    * Files this turn wrote, derived by the caller from the whole turn's
    * successful write/edit tool calls. ChatWindow computes this because the
@@ -271,12 +274,12 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, onOpenSession, entryId, searchBlock, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, writtenFiles }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, onOpenSession, entryId, searchBlock, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, writtenFiles, onReuseImagePrompt }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlock={searchBlock} writtenFiles={writtenFiles} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlock={searchBlock} writtenFiles={writtenFiles} onReuseImagePrompt={onReuseImagePrompt} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -310,6 +313,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.showTimestamp === next.showTimestamp
     && prev.prevTimestamp === next.prevTimestamp
     && prev.writtenFiles === next.writtenFiles
+    && prev.onReuseImagePrompt === next.onReuseImagePrompt
     && prev.sessionId === next.sessionId;
 });
 
@@ -608,6 +612,7 @@ function AssistantMessageView({
   entryId,
   searchBlock,
   writtenFiles,
+  onReuseImagePrompt,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -622,6 +627,7 @@ function AssistantMessageView({
   entryId?: string;
   searchBlock?: AssistantContentBlock;
   writtenFiles?: WrittenFile[];
+  onReuseImagePrompt?: (prompt: string) => void;
 }) {
   const { t } = useI18n();
   const time = showTimestamp ? formatTime(message.timestamp) : null;
@@ -801,7 +807,7 @@ function AssistantMessageView({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {blockItems.map(({ block, originalIndex }) => (
-          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} searchTarget={block === searchBlock} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} />
+          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} searchTarget={block === searchBlock} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} onReuseImagePrompt={onReuseImagePrompt} />
         ))}
       </div>
 
@@ -879,7 +885,7 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, onOpenSession, sessionId, entryId, blockIndex }: { block: AssistantContentBlock; searchTarget?: boolean; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onOpenSession?: (sessionId: string) => void; sessionId?: string; entryId?: string; blockIndex: number }) {
+function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, onOpenSession, sessionId, entryId, blockIndex, onReuseImagePrompt }: { block: AssistantContentBlock; searchTarget?: boolean; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onOpenSession?: (sessionId: string) => void; sessionId?: string; entryId?: string; blockIndex: number; onReuseImagePrompt?: (prompt: string) => void }) {
   if (block.type === "text") {
     return <div data-message-text data-search-target={searchTarget || undefined}><TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} /></div>;
   }
@@ -890,7 +896,7 @@ function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDur
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} duration={duration} onOpenSession={onOpenSession} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} onOpenSession={onOpenSession} cwd={cwd} onReuseImagePrompt={onReuseImagePrompt} />;
   }
   return null;
 }
@@ -1020,7 +1026,7 @@ function isSubagentToolDetails(value: unknown): value is SubagentToolDetails {
   return details.kind === "pi-web-subagent" && typeof details.sessionId === "string";
 }
 
-function ToolCallBlock({ block, result, duration, onOpenSession }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; onOpenSession?: (sessionId: string) => void }) {
+function ToolCallBlock({ block, result, duration, onOpenSession, cwd, onReuseImagePrompt }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; onOpenSession?: (sessionId: string) => void; cwd?: string; onReuseImagePrompt?: (prompt: string) => void }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const inputStr = getToolCallInputText(block);
@@ -1036,6 +1042,18 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
   const isError = result?.isError ?? false;
   const subagent = isSubagentToolDetails(result?.details) ? result.details : null;
+
+  if (block.toolName === IMAGE_GEN_TOOL_NAME && !isEditTool) {
+    return (
+      <ImageGenerationCard
+        block={block}
+        result={result}
+        images={resultImages}
+        cwd={cwd}
+        onReuseImagePrompt={onReuseImagePrompt}
+      />
+    );
+  }
 
   return (
     <div
@@ -1092,6 +1110,21 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
         )}
       </div>
 
+      {/* ── Collapsed: compact thumbnail strip when the result carries images ── */}
+      {!expanded && resultImages.length > 0 && (
+        <div className="tool-result-thumbs">
+          {resultImages.slice(0, 6).map((img, i) => {
+            const src = imageSource(img);
+            return (
+              <ImagePreview key={`${src.slice(-24)}-${i}`} src={src}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={src} alt="" />
+              </ImagePreview>
+            );
+          })}
+        </div>
+      )}
+
       {/* ── Expanded: input args ── */}
       {expanded && (isStreamingInput || !isEditTool) && (
         <pre
@@ -1133,6 +1166,224 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
 
 interface ResultDiff {
   text: string;
+}
+
+function imageGenRatioClass(aspectRatio: string | undefined): string {
+  switch (aspectRatio) {
+    case "1:1": return "ratio-1-1";
+    case "3:4": return "ratio-3-4";
+    case "4:3": return "ratio-4-3";
+    case "16:9": return "ratio-16-9";
+    case "9:16": return "ratio-9-16";
+    default: return "ratio-native";
+  }
+}
+
+function imageGenFileName(prompt: string, index: number, mimeType: string): string {
+  const extension = mimeType.split("/")[1]?.replace("jpeg", "jpg") ?? "png";
+  const slug = prompt
+    .slice(0, 40)
+    .replace(/[^\w\u4e00-\u9fa5-]+/g, "-")
+    .replace(/^[-]+|[-]+$/g, "")
+    || "image";
+  return index > 0 ? `${slug}-${index + 1}.${extension}` : `${slug}.${extension}`;
+}
+
+function downloadImageGenImage(data: string, mimeType: string, fileName: string): void {
+  const anchor = document.createElement("a");
+  anchor.href = `data:${mimeType};base64,${data}`;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
+function imageGridCountClass(imageCount: number, requestedCount: number): string {
+  const count = imageCount > 0 ? imageCount : Math.min(4, Math.max(1, requestedCount));
+  if (count === 1) return "count-1";
+  if (count === 2) return "count-2";
+  return "count-4";
+}
+
+function ImageGenerationCard({ block, result, images, cwd, onReuseImagePrompt }: {
+  block: ToolCallContent;
+  result?: ToolResultMessage;
+  images: ImageContent[];
+  cwd?: string;
+  onReuseImagePrompt?: (prompt: string) => void;
+}) {
+  const { t } = useI18n();
+  const args = block.input ?? {};
+  const prompt = typeof args.prompt === "string" ? args.prompt : "";
+  const modelRef = typeof args.model === "string" ? args.model : "";
+  const aspectRatio = typeof args.aspect_ratio === "string" ? args.aspect_ratio : undefined;
+  const requestedCount = typeof args.count === "number" ? args.count : 1;
+  const seed = typeof args.seed === "number" ? args.seed : undefined;
+  const details = isImageGenerationToolDetails(result?.details) ? result.details : null;
+  const isError = result?.isError ?? false;
+  const isPending = !result;
+  const resultText = result
+    ? result.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n").trim()
+    : null;
+  const modelLabel = modelRef
+    || (details ? `${details.model.provider}/${details.model.modelId}` : IMAGE_GEN_TOOL_NAME);
+  const durationText = details ? `${(details.durationMs / 1000).toFixed(1)}s` : null;
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [savedNotice, setSavedNotice] = useState<string | null>(null);
+
+  const saveToProject = async () => {
+    if (!cwd || !images.length || saveState === "saving") return;
+    setSaveState("saving");
+    setSavedNotice(null);
+    try {
+      let lastFileName = "";
+      for (let index = 0; index < images.length; index += 1) {
+        const src = imageSource(images[index]);
+        const base64 = src.startsWith("data:") ? src.split(",")[1] : "";
+        const mimeType = src.slice(5, src.indexOf(";")) || "image/png";
+        if (!base64) continue;
+        const res = await fetch("/api/images/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cwd,
+            data: base64,
+            mimeType,
+            fileName: imageGenFileName(prompt, index, mimeType),
+          }),
+        });
+        const body = (await res.json().catch(() => ({}))) as { error?: string; fileName?: string };
+        if (!res.ok || body.error) throw new Error(body.error ?? `HTTP ${res.status}`);
+        if (body.fileName) lastFileName = body.fileName;
+      }
+      setSaveState("saved");
+      setSavedNotice(lastFileName ? t("chat.imageGenCardSaved", { file: lastFileName }) : t("chat.imageGenCardSavedShort"));
+      setTimeout(() => setSaveState("idle"), 2500);
+    } catch (e) {
+      setSaveState("error");
+      setSavedNotice(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const downloadAll = () => {
+    images.forEach((img, index) => {
+      const src = imageSource(img);
+      const mimeType = src.startsWith("data:") ? src.slice(5, src.indexOf(";")) || "image/png" : "image/png";
+      const base64 = src.startsWith("data:") ? src.split(",")[1] : "";
+      if (base64) downloadImageGenImage(base64, mimeType, imageGenFileName(prompt, index, mimeType));
+    });
+  };
+
+  const metaParts = [
+    modelLabel,
+    aspectRatio,
+    seed !== undefined ? `seed ${seed}` : undefined,
+    images.length > 0 ? t("chat.imageGenCardCount", { count: images.length }) : undefined,
+    durationText,
+  ].filter(Boolean);
+
+  return (
+    <div className={`image-gen-card${isError && images.length === 0 ? " is-error" : ""}`}>
+      <div className="image-gen-card-head">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" style={{ flex: "0 0 auto" }} aria-hidden="true">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <circle cx="8.5" cy="8.5" r="1.5" />
+          <polyline points="21 15 16 10 5 21" />
+        </svg>
+        <span className="name">{IMAGE_GEN_TOOL_NAME}</span>
+        <span className="sep">·</span>
+        <span>{modelLabel}</span>
+        {aspectRatio && (
+          <>
+            <span className="sep">·</span>
+            <span>{aspectRatio}</span>
+          </>
+        )}
+        <span className="right">
+          {images.length > 0 && <span>{t("chat.imageGenCardCount", { count: images.length })}</span>}
+          {durationText && <span>{durationText}</span>}
+        </span>
+      </div>
+
+      {isPending ? (
+        <div className={`image-gen-gallery ${imageGridCountClass(0, requestedCount)}`}>
+          {Array.from({ length: Math.min(4, Math.max(1, requestedCount)) }, (_, index) => (
+            <div key={index} className="image-gen-placeholder" style={{ aspectRatio: aspectRatio ?? "3/4" }} />
+          ))}
+          <div style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 8, padding: "8px 2px 2px", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)", background: "var(--bg)" }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" style={{ animation: "spin 0.8s linear infinite", flexShrink: 0 }} aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+            </svg>
+            {t("chat.imageGenCardGenerating")}
+          </div>
+        </div>
+      ) : images.length > 0 ? (
+        <div className={`image-gen-gallery ${imageGridCountClass(images.length, requestedCount)}`}>
+          {images.map((img, index) => {
+            const src = imageSource(img);
+            return (
+              <div key={index} className="image-gen-shot">
+                <ImagePreview src={src}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img className={imageGenRatioClass(aspectRatio)} src={src} alt="" />
+                </ImagePreview>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {prompt && (
+        <div className="image-gen-prompt">
+          <span className="label">PROMPT</span>
+          <span className="text">{prompt}</span>
+        </div>
+      )}
+
+      {(isError || (!isPending && images.length === 0)) && resultText && (
+        <div style={{ padding: "6px 10px", borderTop: "1px solid var(--border)", color: isError ? "#f87171" : "var(--text-muted)", fontSize: 12, lineHeight: 1.5, overflowWrap: "anywhere" }}>
+          {resultText}
+        </div>
+      )}
+
+      <div className="image-gen-foot">
+        {onReuseImagePrompt && prompt && (
+          <button type="button" className="image-gen-foot-action" onClick={() => onReuseImagePrompt(prompt)}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polyline points="9 14 4 9 9 4" />
+              <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
+            </svg>
+            {t("chat.imageGenCardReuse")}
+          </button>
+        )}
+        {images.length > 0 && (
+          <button type="button" className="image-gen-foot-action" onClick={downloadAll}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            {t("chat.imageGenCardDownload")}
+          </button>
+        )}
+        {images.length > 0 && cwd && (
+          <button
+            type="button"
+            className="image-gen-foot-action"
+            onClick={saveToProject}
+            disabled={saveState === "saving"}
+            title={savedNotice ?? undefined}
+          >
+            {saveState === "saving" ? t("chat.imageGenCardSaving") : saveState === "saved" ? t("chat.imageGenCardSavedShort") : t("chat.imageGenCardSave")}
+          </button>
+        )}
+        {savedNotice && saveState === "error" && (
+          <span style={{ color: "#f87171", fontSize: 11 }}>{savedNotice}</span>
+        )}
+        <span className="meta">{metaParts.join(" · ")}</span>
+      </div>
+    </div>
+  );
 }
 
 function PairedDiffResult({ diff }: {

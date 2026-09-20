@@ -36,10 +36,19 @@ export async function POST(req: Request) {
     );
   }
 
+  let body: Record<string, unknown>;
+  try {
+    const parsed: unknown = await req.json();
+    if (!isRecord(parsed)) {
+      return NextResponse.json({ ok: false, error: "Body must be a JSON object" }, { status: 400 });
+    }
+    body = parsed;
+  } catch {
+    return NextResponse.json({ ok: false, error: "Invalid JSON body" }, { status: 400 });
+  }
   let tempDir: string | undefined;
 
   try {
-    const body = await req.json() as { providerName?: unknown; provider?: unknown; model?: unknown };
     const providerName = typeof body.providerName === "string" ? body.providerName.trim() : "";
     if (!providerName) return NextResponse.json({ ok: false, error: "providerName is required" }, { status: 400 });
     if (!isRecord(body.provider)) return NextResponse.json({ ok: false, error: "provider is required" }, { status: 400 });

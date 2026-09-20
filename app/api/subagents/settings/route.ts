@@ -11,9 +11,9 @@ export async function GET() {
   try {
     const settings = readSubagentSettings();
     return NextResponse.json({ enabled: settings.builtInEnabled });
-  } catch (error) {
+  } catch {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : String(error) },
+      { error: "Unable to access subagent settings. Check the settings file and its permissions." },
       { status: 500 },
     );
   }
@@ -27,16 +27,25 @@ export async function PUT(req: Request) {
     return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
   }
 
+  let body: { enabled?: unknown };
   try {
-    const body = await req.json() as { enabled?: unknown };
-    if (typeof body.enabled !== "boolean") {
-      return NextResponse.json({ error: "enabled must be a boolean" }, { status: 400 });
+    const parsed: unknown = await req.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return NextResponse.json({ error: "Body must be a JSON object" }, { status: 400 });
     }
+    body = parsed;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  if (typeof body.enabled !== "boolean") {
+    return NextResponse.json({ error: "enabled must be a boolean" }, { status: 400 });
+  }
+  try {
     const settings = writeBuiltInSubagentsEnabled(body.enabled);
     return NextResponse.json({ enabled: settings.builtInEnabled });
-  } catch (error) {
+  } catch {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : String(error) },
+      { error: "Unable to access subagent settings. Check the settings file and its permissions." },
       { status: 500 },
     );
   }

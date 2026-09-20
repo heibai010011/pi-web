@@ -8,11 +8,20 @@ export async function GET() {
 }
 
 export async function PUT(req: Request) {
+  let body: Record<string, unknown>;
   try {
-    const body = await req.json() as Record<string, unknown>;
+    const parsed: unknown = await req.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return NextResponse.json({ error: "Body must be a JSON object" }, { status: 400 });
+    }
+    body = parsed as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  try {
     writeModelsConfig(body);
     return NextResponse.json({ success: true });
-  } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+  } catch {
+    return NextResponse.json({ error: "Unable to save model configuration. Check the configuration file and its permissions." }, { status: 500 });
   }
 }

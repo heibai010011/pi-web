@@ -46,6 +46,9 @@ export function writeBuiltInSubagentsEnabled(
   enabled: boolean,
   settingsPath = getSubagentSettingsPath(),
 ): SubagentSettings {
+  if (typeof enabled !== "boolean") {
+    throw new TypeError("enabled must be a boolean");
+  }
   const stored = readStoredSettings(settingsPath);
   mkdirSync(dirname(settingsPath), { recursive: true });
   writePrivateFileAtomicSync(settingsPath, JSON.stringify({

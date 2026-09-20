@@ -8,6 +8,8 @@ export interface ModelSelectorOption {
   provider: string;
   modelId: string;
   name: string;
+  /** Optional modality marker; "image" options render with a generation badge. */
+  kind?: "image";
 }
 
 interface ModelSelectorProps {
@@ -298,6 +300,7 @@ export function ModelSelector({
                       key={`${option.provider}:${option.modelId}`}
                       active={option.modelId === value?.modelId && option.provider === value?.provider}
                       label={option.name}
+                      kind={option.kind}
                       onClick={() => choose(option)}
                     />
                   ))}
@@ -311,7 +314,8 @@ export function ModelSelector({
   );
 }
 
-function ModelOptionButton({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+function ModelOptionButton({ active, label, kind, onClick }: { active: boolean; label: string; kind?: "image"; onClick: () => void }) {
+  const { t } = useI18n();
   return (
     <button
       type="button"
@@ -326,6 +330,11 @@ function ModelOptionButton({ active, label, onClick }: { active: boolean; label:
         ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
         : <span style={{ width: 10, flexShrink: 0 }} />}
       <span title={label} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
+      {kind === "image" && (
+        <span style={{ marginLeft: "auto", flexShrink: 0, padding: "1px 6px", borderRadius: 999, border: "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))", color: "var(--accent)", fontFamily: "var(--font-mono)", fontSize: 9, fontWeight: 600, lineHeight: 1.4 }}>
+          {t("chat.imageGenBadge")}
+        </span>
+      )}
     </button>
   );
 }

@@ -183,19 +183,18 @@ test("existing-session prompts rely on the persisted tool selection", () => {
 });
 
 test("submission recovery updates live refs before a possible session rekey", () => {
-  const restoreMethod = chatInputSource.slice(
-    chatInputSource.indexOf("    restoreSubmission(text:"),
-    chatInputSource.indexOf("    insertText(text:"),
-  );
-
-  assert.ok(
-    restoreMethod.indexOf("valueRef.current = restoredDraft.value")
-      < restoreMethod.indexOf("setValue((current) =>"),
-  );
-  assert.ok(
-    restoreMethod.indexOf("attachedImagesRef.current = restoredImages")
-      < restoreMethod.indexOf("setAttachedImages((current) =>"),
-  );
+  const start = chatInputSource.indexOf("  const restoreSubmission = useCallback(");
+  const end = chatInputSource.indexOf("  const registerRestorationOwner", start);
+  assert.ok(start >= 0 && end > start, "actual restoration callback must exist");
+  const restoreMethod = chatInputSource.slice(start, end);
+  for (const [refWrite, stateWrite] of [
+    ["valueRef.current = restored.value", "setValue(restored.value)"],
+    ["attachedImagesRef.current = nextImages", "setAttachedImages(nextImages)"],
+  ]) {
+    const refIndex = restoreMethod.indexOf(refWrite);
+    const stateIndex = restoreMethod.indexOf(stateWrite);
+    assert.ok(refIndex >= 0 && stateIndex > refIndex, `${refWrite} must precede state update`);
+  }
 });
 
 test("stale fresh-session completion cannot replace the active composer", () => {
@@ -658,7 +657,7 @@ test("an optimistic submission survives a background reload until message_end", 
   );
   assert.match(
     sendSource,
-    /restoreSubmission\(message, images, composerDraftKey\);\s*optimisticUserMessageKeyRef\.current = null;\s*optimisticUserMessageRef\.current = null;/,
+    /restoreUnacceptedSubmission\(\);\s*optimisticUserMessageKeyRef\.current = null;\s*optimisticUserMessageRef\.current = null;/,
   );
 });
 

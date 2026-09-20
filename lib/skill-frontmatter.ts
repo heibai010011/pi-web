@@ -1,7 +1,7 @@
+import { isDeepStrictEqual } from "node:util";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
 const KEY = "disable-model-invocation";
-const KEY_LINE = `[ \\t]*(?:${KEY}|"${KEY}"|'${KEY}')[ \\t]*:`;
 const NEWLINE = "\\r\\n|\\n|\\r";
 
 interface FrontmatterBlock {
@@ -24,6 +24,27 @@ function findFrontmatterBlock(content: string): FrontmatterBlock | undefined {
     closingStart: opening[0].length + closing.index + closing[1].length,
     newline: opening[1],
   };
+}
+
+function topLevelKeyLine(head: string): string {
+  // YAML permits an indented root mapping. Its actual key is less indented
+  // than same-named keys in nested mappings or block scalar content.
+  const matches = [...head.matchAll(new RegExp(`(?:^|${NEWLINE})([ \\t]*)(?:${KEY}|"${KEY}"|'${KEY}')[ \\t]*:`, "g"))];
+  const indent = Math.min(...matches.map(match => match[1].length));
+  if (!Number.isFinite(indent)) throw new Error(`Cannot edit ${KEY}: unsupported frontmatter formatting`);
+  return `[ \\t]{${indent}}(?:${KEY}|"${KEY}"|'${KEY}')[ \\t]*:`;
+}
+
+function validateToggle(content: string, disable: boolean, original: Record<string, unknown>): string {
+  try {
+    const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
+    if (disable ? frontmatter[KEY] !== true : Object.prototype.hasOwnProperty.call(frontmatter, KEY)) throw new Error("Invalid toggle");
+    const withoutToggle = (value: Record<string, unknown>) => Object.fromEntries(Object.entries(value).filter(([key]) => key !== KEY));
+    if (!isDeepStrictEqual(withoutToggle(original), withoutToggle(frontmatter))) throw new Error("Unrelated fields changed");
+  } catch {
+    throw new Error(`Cannot edit ${KEY}: unsupported frontmatter formatting`);
+  }
+  return content;
 }
 
 function startsWithFrontmatterFence(content: string): boolean {
@@ -53,10 +74,10 @@ export function setDisableModelInvocation(content: string, disable: boolean): st
     if (hasKey) {
       if (!block) throw new Error(`Cannot edit ${KEY}: unsupported frontmatter formatting`);
       const head = content.slice(block.openingEnd, block.closingStart);
-      const keyLine = new RegExp(`(^|${NEWLINE})(${KEY_LINE})[^\\r\\n]*`);
+      const keyLine = new RegExp(`(^|${NEWLINE})(${topLevelKeyLine(head)})[^\\r\\n]*`);
       if (!keyLine.test(head)) throw new Error(`Cannot edit ${KEY}: unsupported frontmatter formatting`);
       const updated = head.replace(keyLine, "$1$2 true");
-      return content.slice(0, block.openingEnd) + updated + content.slice(block.closingStart);
+      return validateToggle(content.slice(0, block.openingEnd) + updated + content.slice(block.closingStart), disable, frontmatter);
     }
     if (!block) {
       if (startsWithFrontmatterFence(content)) {
@@ -67,19 +88,28 @@ export function setDisableModelInvocation(content: string, disable: boolean): st
       const body = bom ? content.slice(1) : content;
       return `${bom}---\n${KEY}: true\n---\n${body}`;
     }
-    return (
+    const head = content.slice(block.openingEnd, block.closingStart);
+    const firstContentLine = head.split(/\r\n|\n|\r/).find(line => line.trim() && !line.trimStart().startsWith("#"));
+    if (firstContentLine?.trimStart().startsWith("{")) {
+      throw new Error(`Cannot edit ${KEY}: unsupported frontmatter formatting`);
+    }
+    const indent = firstContentLine?.match(/^[ \t]*/)?.[0] ?? "";
+    const updated = (
       content.slice(0, block.openingEnd) +
-      `${KEY}: true${block.newline}` +
+      `${indent}${KEY}: true${block.newline}` +
       content.slice(block.openingEnd)
     );
+    // Anchors/tags and other YAML forms can evade a textual format check.
+    // Never return an insertion that the SDK cannot load as the intended toggle.
+    return validateToggle(updated, true, frontmatter);
   }
 
   if (!block) throw new Error(`Cannot edit ${KEY}: unsupported frontmatter formatting`);
   const head = content.slice(block.openingEnd, block.closingStart);
   // Keep the preceding newline, when present, and consume the key line's own
   // newline so the surrounding frontmatter retains exactly one line break.
-  const keyLine = new RegExp(`(^|${NEWLINE})${KEY_LINE}[^\\r\\n]*(?:${NEWLINE}|$)`);
+  const keyLine = new RegExp(`(^|${NEWLINE})${topLevelKeyLine(head)}[^\\r\\n]*(?:${NEWLINE}|$)`);
   if (!keyLine.test(head)) throw new Error(`Cannot edit ${KEY}: unsupported frontmatter formatting`);
   const updated = head.replace(keyLine, "$1");
-  return content.slice(0, block.openingEnd) + updated + content.slice(block.closingStart);
+  return validateToggle(content.slice(0, block.openingEnd) + updated + content.slice(block.closingStart), disable, frontmatter);
 }

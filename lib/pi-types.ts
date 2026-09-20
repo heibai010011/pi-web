@@ -143,6 +143,7 @@ export interface AgentSessionLike {
   readonly settingsManager: SettingsManager;
   readonly agent: {
     state?: {
+      messages?: ReturnType<SessionManager["buildSessionContext"]>["messages"];
       systemPrompt?: string;
       thinkingLevel?: string;
       streamingMessage?: PiAgentMessage;

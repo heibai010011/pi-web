@@ -80,7 +80,10 @@ export async function POST(req: Request) {
 // DELETE /api/worktrees  body: { cwd, path, force? }
 export async function DELETE(req: Request) {
   try {
-    const body = await req.json() as { cwd?: string; path?: string; force?: boolean };
+    const body = await req.json() as { cwd?: string; path?: string; force?: unknown };
+    if (body.force !== undefined && typeof body.force !== "boolean") {
+      return NextResponse.json({ error: "force must be a boolean" }, { status: 400 });
+    }
     if (!body.cwd || typeof body.cwd !== "string") {
       return NextResponse.json({ error: "cwd is required" }, { status: 400 });
     }
