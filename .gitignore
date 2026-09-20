@@ -26,6 +26,8 @@
 .DS_Store
 *.pem
 .npm-cache/
+/.agents/
+/skills-lock.json
 
 # debug
 npm-debug.log*

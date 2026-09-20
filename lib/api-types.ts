@@ -7,6 +7,7 @@ export interface SubagentProfilesResponse {
 
 export interface SubagentSettingsResponse {
   enabled: boolean;
+  maxConcurrent: number;
 }
 
 export interface ShellToolSettingsResponse {
@@ -139,6 +140,7 @@ export interface PluginPackageInfo {
   packageName?: string;
   version?: string;
   configuredVersion?: string;
+  description?: string;
   counts: PluginResourceCounts;
   resources: PluginResourceInfo[];
   status: "loaded" | "installed" | "missing" | "disabled";

@@ -75,6 +75,12 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   if (initial.model) {
     defaultModel = { provider: initial.model.provider, modelId: initial.model.id };
   }
+  const defaultThinkingLevel = initial.thinkingLevel
+    ?? (initial.model
+      ? settings.getModelThinkingLevel(initial.model.provider, initial.model.id)
+      : undefined)
+    ?? settings.getDefaultThinkingLevel()
+    ?? null;
 
   // Image-generation models: static pi-ai catalog filtered to providers with
   // stored credentials. Failures degrade to an empty list — chat models must
@@ -96,6 +102,7 @@ async function loadModels(cwd: string): Promise<ModelsData> {
       models: Object.fromEntries(nameMap),
       modelList,
       defaultModel,
+      defaultThinkingLevel,
       thinkingLevels,
       thinkingLevelMaps,
       thinkingLevelPins,
@@ -110,6 +117,7 @@ const EMPTY_MODELS: ModelsData = {
   models: {},
   modelList: [],
   defaultModel: null,
+  defaultThinkingLevel: null,
   thinkingLevels: {},
   thinkingLevelMaps: {},
   thinkingLevelPins: {},

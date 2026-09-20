@@ -137,8 +137,50 @@ test("fresh sessions use the preference while persisted and live sessions restor
   assert.match(source, /d\.toolNames !== undefined \? getPresetFromToolNames\(d\.toolNames\) : "default"/);
   assert.match(changeSource, /setPreferredToolPreset\(preset\)/);
   assert.match(changeSource, /\(sid, \{ type: "set_tools", toolNames \}\)/);
+  assert.match(changeSource, /activeSessionId !== sid \|\| result\?\.recreated/);
+  assert.match(changeSource, /result\?\.recreated[\s\S]*?maintainEventsConnected\(activeSessionId\)/);
   assert.match(changeSource, /sessionIdRef\.current = activeSessionId/);
   assert.doesNotMatch(loadToolsSource, /setPreferredToolPreset/);
+});
+
+test("only the session-mount load probes disk for external appends", () => {
+  const loadSessionSource = source.slice(
+    source.indexOf("  const loadSession = useCallback"),
+    source.indexOf("  const loadContext = useCallback"),
+  );
+  const mountSource = source.slice(
+    source.indexOf("// Load session on mount"),
+    source.indexOf("sessionHookMountedRef.current = false"),
+  );
+  assert.match(loadSessionSource, /options\?: \{ force\?: boolean \}/);
+  assert.match(loadSessionSource, /if \(options\?\.force\) params\.set\("force", "1"\)/);
+  assert.match(loadSessionSource, /d\.wrapperRebuilt[\s\S]*?eventConnectionRef\.current\?\.close\(\)[\s\S]*?maintain\(sid\)/);
+  assert.match(mountSource, /loadSession\(session\.id, true, true, \{ force: true \}\)/);
+  assert.match(source, /await loadSession\(sid\)/);
+  assert.equal([...source.matchAll(/\{ force: true \}/g)].length, 1);
+});
+
+test("first user messages expose both branch actions and edit before their own entry", () => {
+  const navigateSource = source.slice(
+    source.indexOf("  const handleLeafChange = useCallback"),
+    source.indexOf("  const handleModelChange = useCallback"),
+  );
+
+  assert.match(chatWindowSource, /onFork=\{sessionBusy \|\| isNew \? undefined : handleFork\}/);
+  assert.doesNotMatch(chatWindowSource, /idx === 0 && msg\.role === "user"/);
+  assert.doesNotMatch(chatWindowSource, /prevAssistantEntryId/);
+  assert.match(navigateSource, /type: "navigate_tree",\s*targetId: leafId/);
+  assert.match(navigateSource, /await loadContext\(sid, leafId\)/);
+  assert.match(navigateSource, /return await handleLeafChange\(entryId\)/);
+  assert.match(navigateSource, /return isCurrentSelection\(\) && !branchNavigationFailedRef\.current/);
+});
+
+test("an empty persisted session displays the model it will use on first send", () => {
+  assert.match(
+    source,
+    /currentModel \?\? \(data\?\.context\.messages\.length === 0 \? newSessionDefaultModel : null\)/,
+  );
+  assert.match(source, /setNewSessionDefaultModel\(displayDefaultModel/);
 });
 
 test("the selector prefers the live wrapper model over persisted response metadata", () => {
@@ -292,7 +334,7 @@ test("delegates event stream readiness and hides an empty agent phase", () => {
   assert.match(ensureSource, /eventConnectionRef\.current!\.maintain\(sid\)/);
   // Matches upstream: the streaming bubble mounts only with content, and the
   // running phase renders as a pulsing muted label when nothing streams yet.
-  assert.match(chatWindowSource, /streamState\.isStreaming && Boolean\(streamState\.streamingMessage\?\.content\.length\) && streamState\.streamingMessage/);
+  assert.match(chatWindowSource, /streamState\.isStreaming && hasStreamingContent && streamState\.streamingMessage/);
   assert.match(chatWindowSource, /agentRunning && !streamState\.streamingMessage\?\.content\.length && agentPhase && \(/);
   assert.match(chatWindowSource, /return null;/);
 });
@@ -318,13 +360,19 @@ test("uses server pagination state instead of guessing from rendered rows", () =
   assert.doesNotMatch(chatWindowSource, /rendered\.length >= visibleCount/);
 });
 
-test("connects a selected session when another browser reports it running", () => {
+test("keeps the selected session warm while idle and renews its lease", () => {
   assert.match(source, /sessionRunning\?: boolean/);
   assert.match(
     source,
-    /if \(!session\?\.id \|\| !sessionRunning\) return;[\s\S]*?maintainEventsConnected\(session\.id\)/,
+    /const sid = session\?\.id;[\s\S]*?if \(!sid\) return;[\s\S]*?maintainEventsConnected\(sid\)/,
   );
-  assert.match(source, /maintainEventsConnected\(session\.id\)/);
+  assert.match(source, /sessionPropIdRef\.current === sid/);
+  assert.match(source, /SESSION_LEASE_RENEW_INTERVAL_MS = 30_000/);
+  assert.match(source, /fetch\(`\/api\/agent\/\$\{encodeURIComponent\(sid\)\}\/lease`/);
+  assert.match(source, /setInterval\(\(\) => void renewLease\(\), SESSION_LEASE_RENEW_INTERVAL_MS\)/);
+  assert.match(source, /result\.renewed === 0[\s\S]*?closeEvents\(\)[\s\S]*?maintainEventsConnected\(sid\)/);
+  assert.match(source, /if \(sessionPropIdRef\.current === sid\) \{[\s\S]*?cancelEventStreamGrace\(\);[\s\S]*?return;/);
+  assert.match(source, /maintainEventsConnected\(sid\)/);
   assert.doesNotMatch(source, /void connectEvents\(/);
   assert.match(chatWindowSource, /sessionRunning\?: boolean/);
   assert.match(chatWindowSource, /session, sessionRunning, newSessionCwd/);
@@ -384,6 +432,16 @@ test("keeps the streaming bubble alive when the event stream reconnects mid-run"
   );
 });
 
+test("restoring a running session does not clear an SSE snapshot", () => {
+  const mountSource = source.slice(
+    source.indexOf("// Load session on mount"),
+    source.indexOf("useEffect(() => {\n    onSystemPromptChange"),
+  );
+
+  assert.match(mountSource, /dispatch\(\{ type: "resume" \}\)/);
+  assert.doesNotMatch(mountSource, /dispatch\(\{ type: "start" \}\)/);
+});
+
 test("shows the latest streamed tool execution progress in the running phase", () => {
   const updateSource = source.slice(
     source.indexOf('case "tool_execution_update"'),
@@ -394,6 +452,24 @@ test("shows the latest streamed tool execution progress in the running phase", (
   assert.match(updateSource, /tools: \[\.\.\.tools\.filter\([\s\S]*?, updated\]/);
   assert.match(chatWindowSource, /if \(latest\?\.progress\)/);
   assert.match(chatWindowSource, /chat\.runningNamedTool[\s\S]*latest\.progress/);
+});
+
+test("reconnects active shell output to its streaming tool call", () => {
+  const updateSource = source.slice(
+    source.indexOf('case "tool_execution_update"'),
+    source.indexOf('case "tool_execution_end"'),
+  );
+  const endSource = source.slice(
+    source.indexOf('case "tool_execution_end"'),
+    source.indexOf('case "queue_update"'),
+  );
+
+  assert.match(updateSource, /name === "bash" \|\| name === "powershell"/);
+  assert.match(updateSource, /setActiveToolResults/);
+  assert.match(updateSource, /content,/);
+  assert.match(endSource, /setActiveToolResults[\s\S]*next\.delete\(id\)/);
+  assert.match(chatWindowSource, /const map = new Map\(activeToolResults\)/);
+  assert.match(chatWindowSource, /<MessageView message=\{streamState\.streamingMessage as AgentMessage\} toolResults=\{toolResultsMap\}/);
 });
 
 test("plays the enabled sound once for each extension dialog", () => {
@@ -679,5 +755,23 @@ test("manual compaction reloads without unmounting the chat scroller", () => {
   // The loading spinner may only replace the chat area on first mount, where
   // there is no reading position to preserve.
   assert.doesNotMatch(source, /loadSession\(sid, true\b/);
-  assert.match(source, /loadSession\(session\.id, true, true\)/);
+  assert.match(source, /loadSession\(session\.id, true, true, \{ force: true \}\)/);
+});
+
+test("auto-compact slash command toggles session auto-compaction", () => {
+  assert.match(source, /\["compact", "auto-compact", "reload"/);
+  const commandSource = source.slice(
+    source.indexOf('case "auto-compact"'),
+    source.indexOf('case "reload"'),
+  );
+  assert.ok(commandSource.length > 0, "auto-compact case not found before reload case");
+  assert.match(commandSource, /sendAgentCommand<AgentStateResponse>\(sid, \{\s*type: "get_state"\s*\}\)/);
+  assert.match(commandSource, /!\(liveState\?\.autoCompactionEnabled \?\? true\)/);
+  assert.match(commandSource, /sendAgentCommand\(sid, \{\s*type: "set_auto_compaction",\s*enabled: nextEnabled,\s*\}\)/);
+  assert.match(commandSource, /setAutoCompactionEnabled\(nextEnabled\)/);
+  assert.equal([...commandSource.matchAll(/if \(!isCurrent\(\)\) return stale\(\);/g)].length, 2);
+  assert.doesNotMatch(commandSource, /!autoCompactionEnabled/);
+  // State mirrors the wrapper so the toggle reflects server-side changes too.
+  assert.match(source, /setAutoCompactionEnabled\(state\?\.autoCompactionEnabled \?\? true\)/);
+  assert.match(source, /setAutoCompactionEnabled\(liveState\.autoCompactionEnabled \?\? true\)/);
 });

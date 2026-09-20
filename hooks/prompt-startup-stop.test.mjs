@@ -574,7 +574,7 @@ test("session switch during SSE startup prevents stale prompt dispatch", async (
 
 function wireReconciliation(s) {
   Object.assign(s.context, {
-    syncLiveModel() {}, setIsCompacting() {}, setQueuedMessages() {},
+    syncLiveModel() {}, setIsCompacting() {}, setQueuedMessages() {}, setActiveToolResults() {}, setAutoCompactionEnabled() {},
     normalizeQueuedMessages: value => value ?? [], setRetryInfo() {},
     scheduleEventStreamClose() {}, onAgentEnd() {},
     notifiedPromptRunIdRef: { current: null },

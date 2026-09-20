@@ -54,7 +54,8 @@ test("new-session startup adopts server state only while explicit overrides are 
     ensureSource,
     /thinkingLevelOverrideRef\.current === selectedThinkingLevel/,
   );
-  assert.match(ensureSource, /setThinkingLevel\(result\.thinkingLevel\)/);
+  assert.match(ensureSource, /setLiveThinkingLevel\(asConcreteThinkingLevel\(result\.thinkingLevel\)\)/);
+  assert.match(ensureSource, /setNewSessionDefaultThinkingLevel\(asConcreteThinkingLevel\(result\.thinkingLevel\)\)/);
 });
 
 test("model-list refresh does not overwrite a live session or explicit thinking override", () => {
@@ -68,5 +69,6 @@ test("model-list refresh does not overwrite a live session or explicit thinking 
     loadModelsSource,
     /thinkingLevelOverrideRef\.current === null/,
   );
-  assert.match(loadModelsSource, /setThinkingLevel\(\(pinned[\s\S]*\?\? "auto"\)/);
+  assert.match(loadModelsSource, /setNewSessionDefaultThinkingLevel\(/);
+  assert.doesNotMatch(loadModelsSource, /setThinkingLevel\(/);
 });

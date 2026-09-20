@@ -13,6 +13,7 @@ import type { AgentSessionLike } from "./pi-types";
 import {
   subagentFinalText,
   subagentToolDetails,
+  type ResumeSubagentRequest,
   type StartSubagentRequest,
   type SubagentExecution,
   type SubagentExtensionRuntime,
@@ -22,7 +23,9 @@ import {
   resolveSubagentProfile,
   SUBAGENT_CONTROL_TOOL_NAMES,
   SUBAGENT_META_TYPE,
+  SUBAGENT_STATUS_TYPE,
   SUBAGENT_RESULT_TYPE,
+  selectSubagentExtensionTools,
   withSubagentExtensionTools,
   type SubagentMetadata,
   type SubagentResultMetadata,
@@ -33,7 +36,10 @@ import { buildSubagentPromptPlan } from "./subagent-prompt";
 import { appendSubagentInputFiles, loadSubagentInputFiles } from "./subagent-input";
 import { projectTrustReloadOptions } from "./project-trust";
 import { resolveShellTools } from "./powershell-settings";
-import { isBuiltInSubagentsEnabled } from "./subagent-settings";
+import { isBuiltInSubagentsEnabled, readSubagentSettings } from "./subagent-settings";
+import { SubagentQueue } from "./subagent-queue";
+import { addWorktree, removeWorktree } from "./worktree";
+import { randomUUID } from "node:crypto";
 
 interface HostSession {
   readonly inner: AgentSessionLike;
@@ -67,17 +73,29 @@ type StoredSubagentExecution = {
   run: SubagentRunInfo;
   completion: Promise<SubagentRunInfo>;
   abortRequested: boolean;
+  cancelQueued?: () => boolean;
 };
 
 declare global {
   var __piSubagentRuns: Map<string, StoredSubagentExecution> | undefined;
-  var __piSubagentStartingCounts: Map<string, number> | undefined;
   var __piSubagentStarts: Map<Promise<SubagentExecution>, string> | undefined;
+  var __piSubagentQueue: SubagentQueue<SubagentRunInfo> | undefined;
 }
-
-const MAX_CONCURRENT_SUBAGENTS = 4;
 const SUBAGENT_CONTEXT_LIMIT = 50_000;
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+/** pi's agent loop records provider failures as an assistant message with `stopReason: "error"` and resolves `prompt()` normally; surface that as a failed run. */
+function lastAssistantError(sessionManager: { getEntries?: () => unknown }): string | undefined {
+  const entries = sessionManager.getEntries?.();
+  if (!Array.isArray(entries)) return undefined;
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i] as { type?: unknown; message?: { role?: unknown; stopReason?: unknown; errorMessage?: unknown } };
+    if (entry?.type !== "message" || entry.message?.role !== "assistant") continue;
+    if (entry.message.stopReason !== "error") return undefined;
+    return typeof entry.message.errorMessage === "string" && entry.message.errorMessage ? entry.message.errorMessage : "Provider returned an error";
+  }
+  return undefined;
+}
 
 function getSubagentRuns(): Map<string, StoredSubagentExecution> {
   if (!globalThis.__piSubagentRuns) globalThis.__piSubagentRuns = new Map();
@@ -91,15 +109,27 @@ export async function settleSubagentStartsForDeletion(ids: ReadonlySet<string>):
   await Promise.allSettled(starts.map(([promise]) => promise));
 }
 
+/** Cancel before draining a parent that may be waiting for its queued tool. */
+export function cancelQueuedSubagentsForDeletion(ids: ReadonlySet<string>): void {
+  for (const [id, stored] of getSubagentRuns()) {
+    if (!ids.has(id)) continue;
+    stored.abortRequested = true;
+    stored.cancelQueued?.();
+  }
+}
+
 export async function settleSubagentsForDeletion(ids: ReadonlySet<string>): Promise<void> {
   const runs = [...getSubagentRuns()].filter(([id]) => ids.has(id));
-  for (const [, stored] of runs) stored.abortRequested = true;
+  for (const [, stored] of runs) {
+    stored.abortRequested = true;
+    stored.cancelQueued?.();
+  }
   await Promise.allSettled(runs.map(([, stored]) => stored.completion));
 }
 
-function getSubagentStartingCounts(): Map<string, number> {
-  if (!globalThis.__piSubagentStartingCounts) globalThis.__piSubagentStartingCounts = new Map();
-  return globalThis.__piSubagentStartingCounts;
+function getSubagentQueue(): SubagentQueue<SubagentRunInfo> {
+  if (!globalThis.__piSubagentQueue) globalThis.__piSubagentQueue = new SubagentQueue();
+  return globalThis.__piSubagentQueue;
 }
 
 function parseSubagentModel(runtime: ModelRuntime, value: string | undefined) {
@@ -126,22 +156,17 @@ function parentContextText(parent: HostSession): string {
   return `${serialized.slice(0, SUBAGENT_CONTEXT_LIMIT)}\n[Parent context truncated]`;
 }
 
-function reserveSubagentSlot(parentSessionId: string): () => void {
-  const starting = getSubagentStartingCounts();
-  const active = [...getSubagentRuns().values()].filter((item) =>
-    item.run.parentSessionId === parentSessionId
-      && (item.run.status === "starting" || item.run.status === "running")
-  ).length;
-  const startingCount = starting.get(parentSessionId) ?? 0;
-  if (active + startingCount >= MAX_CONCURRENT_SUBAGENTS) {
-    throw new Error(`A session can run at most ${MAX_CONCURRENT_SUBAGENTS} subagents at once`);
+async function cleanupWorktree(
+  parentCwd: string,
+  worktree: { path: string; branch: string } | undefined,
+): Promise<string | undefined> {
+  if (!worktree) return undefined;
+  try {
+    await removeWorktree(parentCwd, worktree.path);
+    return undefined;
+  } catch (error) {
+    return `Worktree retained at ${worktree.path}: ${error instanceof Error ? error.message : String(error)}`;
   }
-  starting.set(parentSessionId, startingCount + 1);
-  return () => {
-    const remaining = (starting.get(parentSessionId) ?? 1) - 1;
-    if (remaining > 0) starting.set(parentSessionId, remaining);
-    else starting.delete(parentSessionId);
-  };
 }
 
 /** Keep result persistence and UI publication behind the same deletion fence. */
@@ -157,6 +182,7 @@ export function publishSubagentCompletion(
     completedAt: run.completedAt!,
     ...(run.result ? { result: run.result } : {}),
     ...(run.error ? { error: run.error } : {}),
+    ...(run.worktreeCleanupError ? { worktreeCleanupError: run.worktreeCleanupError } : {}),
   };
   sessionManager.appendCustomEntry(SUBAGENT_RESULT_TYPE, persisted);
   onUpdate?.(run);
@@ -182,12 +208,17 @@ export function createSubagentController(
     if (!parent?.isAlive()) throw new Error("Parent session is no longer available");
     if (!parent.sessionFile) throw new Error("Parent session must be persisted before starting a subagent");
 
-    const releaseSlot = reserveSubagentSlot(parentSessionId);
+    let isolatedWorktree: { path: string; branch: string } | undefined;
     try {
       const profile = resolveSubagentProfile(parent.cwd, request.profile);
       if (!profile) throw new Error(`Unknown or disabled subagent profile: ${request.profile}`);
 
       const runInBackground = request.runInBackground ?? profile.runInBackground;
+      const isolation = profile.isolation === "off" ? undefined : request.isolation ?? profile.isolation;
+      if (isolation === "worktree") {
+        isolatedWorktree = await addWorktree(parent.cwd, `pi-web-agent-${randomUUID()}`);
+      }
+      const childCwd = isolatedWorktree?.path ?? parent.cwd;
       const inheritContext = request.inheritContext ?? profile.inheritContext;
       const maxTurns = request.maxTurns ?? profile.maxTurns;
       if (maxTurns !== undefined && (!Number.isFinite(maxTurns) || maxTurns < 0)) {
@@ -201,7 +232,7 @@ export function createSubagentController(
 
       const agentDir = getAgentDir();
       const parentModelRuntime = (parent.inner as unknown as { modelRuntime: ModelRuntime }).modelRuntime;
-      const settingsManager = SettingsManager.create(parent.cwd, agentDir);
+      const settingsManager = SettingsManager.create(childCwd, agentDir);
       const inheritedParentContext = inheritContext
         ? `The following is the active conversation context from the parent session. Use it only as background for the delegated task:\n${parentContextText(parent)}`
         : undefined;
@@ -211,13 +242,14 @@ export function createSubagentController(
         tools: profile.tools,
         loadSkills: profile.loadSkills,
         loadExtensions: profile.loadExtensions,
+        promptMode: profile.promptMode,
         task: appendSubagentInputFiles(request.task, inputFiles),
         inheritedParentContext,
       });
       const { chatOnly, appendSystemPrompt, delegatedTask } = promptPlan;
       if (!chatOnly) initTheme();
       const services = await createAgentSessionServices({
-        cwd: parent.cwd,
+        cwd: childCwd,
         agentDir,
         modelRuntime: parentModelRuntime,
         settingsManager,
@@ -227,7 +259,7 @@ export function createSubagentController(
           noPromptTemplates: true,
           noThemes: true,
           noContextFiles: true,
-          ...(chatOnly
+          ...(chatOnly || promptPlan.exactSystemPrompt !== undefined
             ? {
                 systemPrompt: " ",
                 systemPromptOverride: () => undefined,
@@ -236,12 +268,14 @@ export function createSubagentController(
           appendSystemPrompt,
         },
         ...((profile.loadExtensions || profile.loadSkills)
-          ? { resourceLoaderReloadOptions: projectTrustReloadOptions(parent.cwd, agentDir) }
+          ? { resourceLoaderReloadOptions: projectTrustReloadOptions(childCwd, agentDir) }
           : {}),
       });
 
       const extensionToolNames = profile.loadExtensions
-        ? services.resourceLoader.getExtensions().extensions.flatMap((extension) => [...extension.tools.keys()])
+        ? profile.extensionTools?.length
+          ? selectSubagentExtensionTools(services.resourceLoader.getExtensions().extensions, profile.extensionTools)
+          : services.resourceLoader.getExtensions().extensions.flatMap((extension) => [...extension.tools.keys()])
         : [];
       const activeTools = resolveShellTools(
         withSubagentExtensionTools(profile.tools, extensionToolNames),
@@ -249,7 +283,7 @@ export function createSubagentController(
       );
 
       assertSessionNotDeleting(parentSessionId);
-      const sessionManager = SessionManager.create(parent.cwd, undefined, { parentSession: parent.sessionFile });
+      const sessionManager = SessionManager.create(childCwd, undefined, { parentSession: parent.sessionFile });
       const createdAt = new Date().toISOString();
       const metadata: SubagentMetadata = {
         version: 1,
@@ -266,8 +300,10 @@ export function createSubagentController(
           appendSystemPrompt: [...appendSystemPrompt],
           tools: [...activeTools],
           loadSkills: profile.loadSkills,
-          loadExtensions: profile.loadExtensions,
+        loadExtensions: profile.loadExtensions,
+        ...(promptPlan.exactSystemPrompt !== undefined ? { exactSystemPrompt: promptPlan.exactSystemPrompt } : {}),
         },
+        ...(isolatedWorktree ? { worktreePath: isolatedWorktree.path, worktreeBranch: isolatedWorktree.branch } : {}),
       };
       sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, metadata);
       sessionManager.appendSessionInfo(metadata.description);
@@ -301,8 +337,9 @@ export function createSubagentController(
         description: metadata.description,
         task: request.task,
         runInBackground,
-        status: "running",
+        status: "queued",
         createdAt,
+        ...(isolatedWorktree ? { worktreePath: isolatedWorktree.path, worktreeBranch: isolatedWorktree.branch } : {}),
       };
 
       let turnCount = 0;
@@ -321,9 +358,11 @@ export function createSubagentController(
             }
           })
         : () => {};
+      let resolveCompletion!: (run: SubagentRunInfo) => void;
+      const completion = new Promise<SubagentRunInfo>((resolve) => { resolveCompletion = resolve; });
       const stored: StoredSubagentExecution = {
         run: initialRun,
-        completion: Promise.resolve(initialRun),
+        completion,
         abortRequested: false,
       };
       getSubagentRuns().set(initialRun.sessionId, stored);
@@ -332,11 +371,31 @@ export function createSubagentController(
 
       const handleParentAbort = () => {
         stored.abortRequested = true;
-        void inner.abort();
+        if (stored.run.status === "queued") stored.cancelQueued?.();
+        else void inner.abort();
       };
       if (!runInBackground) request.signal?.addEventListener("abort", handleParentAbort, { once: true });
 
-      stored.completion = (async () => {
+      const execute = async (): Promise<SubagentRunInfo> => {
+        if (stored.abortRequested || isSessionDeletionBlocked(initialRun.sessionId) || isSessionDeletionBlocked(parentSessionId)) {
+          let result: SubagentRunInfo = { ...initialRun, status: "aborted", completedAt: new Date().toISOString() };
+          try {
+            const cleanupError = await cleanupWorktree(parent.cwd, isolatedWorktree);
+            if (cleanupError) result = { ...result, worktreeCleanupError: cleanupError };
+            publishSubagentCompletion(sessionManager, result, request.onUpdate);
+            stored.run = result;
+            return result;
+          } finally {
+            unsubscribeTurns();
+            request.signal?.removeEventListener("abort", handleParentAbort);
+            getSubagentRuns().delete(initialRun.sessionId);
+            dependencies.invalidateSessionList();
+          }
+        }
+        stored.run = { ...stored.run, status: "running" };
+        sessionManager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running" });
+        request.onUpdate?.(stored.run);
+        dependencies.invalidateSessionList();
         let result: SubagentRunInfo;
         try {
           await inner.prompt(delegatedTask, {
@@ -353,11 +412,13 @@ export function createSubagentController(
           });
           const text = inner.getLastAssistantText()?.trim();
           const aborted = stored.abortRequested && !maxTurnsReached;
+          const providerError = aborted ? undefined : lastAssistantError(sessionManager);
           result = {
             ...initialRun,
-            status: aborted ? "aborted" : "completed",
+            status: aborted ? "aborted" : providerError ? "failed" : "completed",
             completedAt: new Date().toISOString(),
             ...(text ? { result: text } : {}),
+            ...(providerError ? { error: providerError } : {}),
           };
         } catch (error) {
           const text = inner.getLastAssistantText()?.trim();
@@ -377,6 +438,8 @@ export function createSubagentController(
         }
 
         try {
+          const cleanupError = await cleanupWorktree(parent.cwd, isolatedWorktree);
+          if (cleanupError) result = { ...result, worktreeCleanupError: cleanupError };
           publishSubagentCompletion(sessionManager, result, request.onUpdate);
           stored.run = result;
           return result;
@@ -384,12 +447,185 @@ export function createSubagentController(
           getSubagentRuns().delete(initialRun.sessionId);
           dependencies.invalidateSessionList();
         }
-      })();
+      };
 
-      return { run: initialRun, completion: stored.completion };
-    } finally {
-      releaseSlot();
+      const finishQueuedAbort = async () => {
+        if (stored.run.status !== "queued") return;
+        const result: SubagentRunInfo = { ...initialRun, status: "aborted", completedAt: new Date().toISOString() };
+        const cleanupError = await cleanupWorktree(parent.cwd, isolatedWorktree);
+        const finalResult = cleanupError ? { ...result, worktreeCleanupError: cleanupError } : result;
+        try {
+          publishSubagentCompletion(sessionManager, finalResult, request.onUpdate);
+          stored.run = finalResult;
+        } finally {
+          unsubscribeTurns();
+          request.signal?.removeEventListener("abort", handleParentAbort);
+          getSubagentRuns().delete(initialRun.sessionId);
+          dependencies.invalidateSessionList();
+          resolveCompletion(finalResult);
+        }
+      };
+      const queued = getSubagentQueue().enqueue(
+        parentSessionId,
+        readSubagentSettings().maxConcurrent,
+        execute,
+        (state) => {
+          if (isSessionDeletionBlocked(initialRun.sessionId) || isSessionDeletionBlocked(parentSessionId)) return;
+          if (state === "queued") {
+            sessionManager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "queued" });
+          }
+          request.onUpdate?.({ ...stored.run, status: state });
+          stored.run = { ...stored.run, status: state };
+          dependencies.invalidateSessionList();
+        },
+        finishQueuedAbort,
+      );
+      stored.cancelQueued = queued.cancel;
+      void queued.promise.then((result) => { if (result) resolveCompletion(result); }, (error) => {
+        resolveCompletion({ ...initialRun, status: "failed", completedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) });
+      }).finally(() => {
+        unsubscribeTurns();
+        request.signal?.removeEventListener("abort", handleParentAbort);
+        getSubagentRuns().delete(initialRun.sessionId);
+        dependencies.invalidateSessionList();
+      });
+
+      return { run: stored.run, completion: stored.completion };
+    } catch (error) {
+      if (isolatedWorktree) {
+        try { await removeWorktree(parent.cwd, isolatedWorktree.path); } catch { /* preserve setup failure and avoid force deletion */ }
+      }
+      throw error;
     }
+  }
+
+  function resume(request: ResumeSubagentRequest): Promise<SubagentExecution> {
+    const promise = resumeExecution(request);
+    const starts = globalThis.__piSubagentStarts ??= new Map();
+    starts.set(promise, request.parentContext.sessionManager.getSessionId());
+    void promise.finally(() => starts.delete(promise)).catch(() => {});
+    return promise;
+  }
+
+  async function resumeExecution(request: ResumeSubagentRequest): Promise<SubagentExecution> {
+    const enabled = dependencies.isBuiltInSubagentsEnabled ?? isBuiltInSubagentsEnabled;
+    if (!enabled()) throw new Error("Pi Web built-in sub-agents are disabled");
+    const parentSessionId = request.parentContext.sessionManager.getSessionId();
+    assertSessionNotDeleting(parentSessionId);
+    assertSessionNotDeleting(request.sessionId);
+    const existing = await get(request.sessionId);
+    assertSessionNotDeleting(parentSessionId);
+    assertSessionNotDeleting(request.sessionId);
+    if (!existing) throw new Error(`Subagent not found: ${request.sessionId}`);
+    if (existing.parentSessionId !== parentSessionId) throw new Error("Subagent does not belong to this parent session");
+    if (existing.status === "running" || existing.status === "queued") throw new Error("Subagent is already running");
+    const parent = dependencies.getSession(parentSessionId);
+    if (!parent?.isAlive()) throw new Error("Parent session is no longer available");
+    const sessionPath = existing.sessionPath || await dependencies.resolveSessionPath(request.sessionId);
+    if (!sessionPath) throw new Error(`Subagent session file not found: ${request.sessionId}`);
+    let wrapper = dependencies.getSession(request.sessionId);
+    if (!wrapper?.isAlive()) wrapper = await dependencies.reopenSession(request.sessionId, sessionPath);
+    assertSessionNotDeleting(parentSessionId);
+    assertSessionNotDeleting(request.sessionId);
+    if (!wrapper.isAlive()) throw new Error("Subagent session is no longer available");
+    if (wrapper.isRunning()) throw new Error("Subagent is already running");
+
+    const runInBackground = request.runInBackground ?? existing.runInBackground;
+    const initialRun: SubagentRunInfo = {
+      ...existing,
+      parentToolCallId: request.parentToolCallId,
+      task: request.task,
+      description: request.description.trim() || existing.description,
+      runInBackground,
+      status: "queued",
+      completedAt: undefined,
+      result: undefined,
+      error: undefined,
+    };
+    const manager = wrapper.inner.sessionManager;
+    let resolveCompletion!: (run: SubagentRunInfo) => void;
+    const completion = new Promise<SubagentRunInfo>((resolve) => { resolveCompletion = resolve; });
+    const stored: StoredSubagentExecution = { run: initialRun, completion, abortRequested: false };
+    getSubagentRuns().set(request.sessionId, stored);
+    request.onUpdate?.(initialRun);
+    dependencies.invalidateSessionList();
+    const handleParentAbort = () => {
+      stored.abortRequested = true;
+      if (stored.run.status === "queued") stored.cancelQueued?.();
+      else void wrapper!.inner.abort();
+    };
+    if (!runInBackground) request.signal?.addEventListener("abort", handleParentAbort, { once: true });
+
+    const execute = async (): Promise<SubagentRunInfo> => {
+      if (stored.abortRequested || isSessionDeletionBlocked(initialRun.sessionId) || isSessionDeletionBlocked(parentSessionId)) {
+        const result: SubagentRunInfo = { ...initialRun, status: "aborted", completedAt: new Date().toISOString() };
+        publishSubagentCompletion(manager, result);
+        stored.run = result;
+        getSubagentRuns().delete(request.sessionId);
+        resolveCompletion(result);
+        return result;
+      }
+      stored.run = { ...stored.run, status: "running" };
+      manager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running" });
+      request.onUpdate?.(stored.run);
+      let result: SubagentRunInfo;
+      try {
+        await wrapper!.inner.prompt(request.task, { source: "rpc" });
+        const text = wrapper!.inner.getLastAssistantText()?.trim();
+        const providerError = stored.abortRequested ? undefined : lastAssistantError(manager);
+        result = {
+          ...initialRun,
+          status: stored.abortRequested ? "aborted" : providerError ? "failed" : "completed",
+          completedAt: new Date().toISOString(),
+          ...(text ? { result: text } : {}),
+          ...(providerError ? { error: providerError } : {}),
+        };
+      } catch (error) {
+        result = {
+          ...initialRun,
+          status: stored.abortRequested || request.signal?.aborted ? "aborted" : "failed",
+          completedAt: new Date().toISOString(),
+          ...(!stored.abortRequested && !request.signal?.aborted ? { error: error instanceof Error ? error.message : String(error) } : {}),
+        };
+      } finally {
+        request.signal?.removeEventListener("abort", handleParentAbort);
+      }
+      try {
+        publishSubagentCompletion(manager, result, request.onUpdate);
+        stored.run = result;
+        return result;
+      } finally {
+        getSubagentRuns().delete(request.sessionId);
+        dependencies.invalidateSessionList();
+      }
+    };
+    const finishQueuedAbort = () => {
+      if (stored.run.status !== "queued") return;
+      const result: SubagentRunInfo = { ...initialRun, status: "aborted", completedAt: new Date().toISOString() };
+      try {
+        publishSubagentCompletion(manager, result, request.onUpdate);
+        stored.run = result;
+      } finally {
+        request.signal?.removeEventListener("abort", handleParentAbort);
+        getSubagentRuns().delete(request.sessionId);
+        dependencies.invalidateSessionList();
+        resolveCompletion(result);
+      }
+    };
+    const queued = getSubagentQueue().enqueue(parentSessionId, readSubagentSettings().maxConcurrent, execute, (state) => {
+      if (isSessionDeletionBlocked(request.sessionId) || isSessionDeletionBlocked(parentSessionId)) return;
+      if (state === "queued") manager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "queued" });
+      stored.run = { ...stored.run, status: state };
+      request.onUpdate?.(stored.run);
+      dependencies.invalidateSessionList();
+    }, finishQueuedAbort);
+    stored.cancelQueued = queued.cancel;
+    void queued.promise.then((result) => { if (result) resolveCompletion(result); }, (error) => resolveCompletion({ ...initialRun, status: "failed", completedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) })).finally(() => {
+      request.signal?.removeEventListener("abort", handleParentAbort);
+      getSubagentRuns().delete(request.sessionId);
+      dependencies.invalidateSessionList();
+    });
+    return { run: stored.run, completion };
   }
 
   async function get(sessionId: string): Promise<SubagentRunInfo | null> {
@@ -451,14 +687,19 @@ export function createSubagentController(
 
   async function abort(sessionId: string): Promise<void> {
     const wrapper = dependencies.getSession(sessionId);
-    if (!wrapper?.isAlive() || !wrapper.isRunning()) throw new Error("Subagent is not running");
     const stored = getSubagentRuns().get(sessionId);
+    if (stored?.run.status === "queued") {
+      stored.abortRequested = true;
+      if (!stored.cancelQueued?.()) throw new Error("Subagent is no longer queued");
+      return;
+    }
+    if (!wrapper?.isAlive() || !wrapper.isRunning()) throw new Error("Subagent is not running");
     if (stored) stored.abortRequested = true;
     await wrapper.inner.abort();
   }
 
   return {
-    extensionRuntime: { start, get, steer, notifyParent },
+    extensionRuntime: { start, resume, get, steer, notifyParent },
     get,
     steer,
     abort,

@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import {
   readSubagentSettings,
+  MAX_SUBAGENT_MAX_CONCURRENT,
   writeBuiltInSubagentsEnabled,
+  writeSubagentMaxConcurrent,
 } from "@/lib/subagent-settings";
 
 export const dynamic = "force-dynamic";
@@ -10,7 +12,7 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const settings = readSubagentSettings();
-    return NextResponse.json({ enabled: settings.builtInEnabled });
+    return NextResponse.json({ enabled: settings.builtInEnabled, maxConcurrent: settings.maxConcurrent });
   } catch {
     return NextResponse.json(
       { error: "Unable to access subagent settings. Check the settings file and its permissions." },
@@ -27,7 +29,7 @@ export async function PUT(req: Request) {
     return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
   }
 
-  let body: { enabled?: unknown };
+  let body: { enabled?: unknown; maxConcurrent?: unknown };
   try {
     const parsed: unknown = await req.json();
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -37,12 +39,25 @@ export async function PUT(req: Request) {
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
-  if (typeof body.enabled !== "boolean") {
+  if (body.enabled === undefined && body.maxConcurrent === undefined) {
+    return NextResponse.json({ error: "enabled or maxConcurrent is required" }, { status: 400 });
+  }
+  if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
     return NextResponse.json({ error: "enabled must be a boolean" }, { status: 400 });
   }
+  if (body.maxConcurrent !== undefined && (
+    typeof body.maxConcurrent !== "number"
+    || !Number.isInteger(body.maxConcurrent)
+    || body.maxConcurrent < 1
+    || body.maxConcurrent > MAX_SUBAGENT_MAX_CONCURRENT
+  )) {
+    return NextResponse.json({ error: `maxConcurrent must be an integer between 1 and ${MAX_SUBAGENT_MAX_CONCURRENT}` }, { status: 400 });
+  }
   try {
-    const settings = writeBuiltInSubagentsEnabled(body.enabled);
-    return NextResponse.json({ enabled: settings.builtInEnabled });
+    let settings = readSubagentSettings();
+    if (body.enabled !== undefined) settings = writeBuiltInSubagentsEnabled(body.enabled);
+    if (body.maxConcurrent !== undefined) settings = writeSubagentMaxConcurrent(body.maxConcurrent);
+    return NextResponse.json({ enabled: settings.builtInEnabled, maxConcurrent: settings.maxConcurrent });
   } catch {
     return NextResponse.json(
       { error: "Unable to access subagent settings. Check the settings file and its permissions." },

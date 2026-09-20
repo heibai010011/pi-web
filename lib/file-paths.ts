@@ -8,9 +8,12 @@ export function normalizeFilePathSlashes(filePath: string): string {
 export function encodeFilePathForApi(filePath: string): string {
   const normalized = normalizeFilePathSlashes(filePath);
   const segments = normalized.split("/").filter(Boolean);
-  // Keep the UNC marker inside the first encoded segment. Literal leading
-  // slashes would be collapsed by URL routing and become a local POSIX path.
-  if (/^\/\/[^/]+\/[^/]+/.test(normalized)) segments[0] = `//${segments[0]}`;
+  // A literal "//" prefix is normalized away by URL routing before it reaches
+  // the catch-all handler, so a UNC root must live inside the first segment:
+  // "//host" encodes as "%2F%2Fhost" and decodes back as a single segment.
+  if (normalized.startsWith("//") && segments.length > 0) {
+    segments[0] = `//${segments[0]}`;
+  }
   return segments.map(encodeURIComponent).join("/");
 }
 

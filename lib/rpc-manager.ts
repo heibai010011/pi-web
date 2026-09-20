@@ -13,7 +13,7 @@ import {
   createProjectCommandBashOperations,
   preferUserBashExtension,
 } from "./project-command-env";
-import { cacheSessionPath, getLatestModelChange, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
+import { cacheSessionPath, getLatestModelChange, invalidateSessionListCache, readLatestSessionEntryId, resolveSessionPath } from "./session-reader";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { runWithSubagentParentSession } from "./subagent-session-lineage";
@@ -39,7 +39,7 @@ import {
   readSubagentSessionResources,
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
-import { createSubagentController, settleSubagentStartsForDeletion, settleSubagentsForDeletion } from "./subagent-runtime";
+import { cancelQueuedSubagentsForDeletion, createSubagentController, settleSubagentStartsForDeletion, settleSubagentsForDeletion } from "./subagent-runtime";
 import { assertSessionNotDeleting, isSessionDeletionBlocked, SessionDeletionConflict } from "./session-deletion-state";
 import { sessionPathKey } from "./session-path";
 import type { DeletionSessionInfo } from "./session-delete-lineage";
@@ -224,6 +224,7 @@ function withExtensionTools(session: AgentSessionLike, toolNames: string[]): str
 
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
+  private activeToolEvents = new Map<string, AgentEvent>();
   private pendingUiResponses = new Map<string, PendingUiResponse>();
   private pendingUiRequests = new Map<string, AgentEvent>();
   private activeCustomUis = new Map<string, ActiveCustomUi>();
@@ -308,6 +309,21 @@ export class AgentSessionWrapper {
     return this._alive && (this.imageAbortController !== null || this.pendingPromptCount > 0 || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
   }
 
+  /**
+   * Drop this idle wrapper when the on-disk JSONL has an entry the in-memory
+   * index never saw (another pi process appended). Rechecks isRunning() so a
+   * prompt that started during the probe cannot be disposed.
+   */
+  evictIfDiskAhead(): boolean {
+    if (!this.isAlive() || this.isRunning()) return false;
+    const diskLatestId = readLatestSessionEntryId(this.sessionFile);
+    if (!diskLatestId || this.inner.sessionManager.getEntry(diskLatestId)) return false;
+    if (this.isRunning()) return false;
+    this.destroy();
+    invalidateSessionListCache();
+    return true;
+  }
+
   isChatOnly(): boolean {
     return this.chatOnly;
   }
@@ -321,6 +337,14 @@ export class AgentSessionWrapper {
       if (event.type === "agent_start") this.agentRunNeedsCompletion = true;
       if (event.type === "agent_end") {
         invalidateSessionListCache();
+      }
+      const toolCallId = event.toolCallId;
+      if (typeof toolCallId === "string") {
+        if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
+          this.activeToolEvents.set(toolCallId, event);
+        } else if (event.type === "tool_execution_end") {
+          this.activeToolEvents.delete(toolCallId);
+        }
       }
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
       this.emit(event);
@@ -521,6 +545,7 @@ export class AgentSessionWrapper {
   onEvent(listener: EventListener): () => void {
     this.listeners.push(listener);
     for (const event of this.pendingUiRequests.values()) listener(event);
+    for (const event of this.activeToolEvents.values()) listener(event);
     return () => {
       const i = this.listeners.indexOf(listener);
       if (i !== -1) this.listeners.splice(i, 1);
@@ -823,21 +848,32 @@ export class AgentSessionWrapper {
 
           const sessionDir = sessionManager.getSessionDir();
           let newSessionFile: string;
+          let forkedManager: SessionManager;
 
           if (!entry.parentId) {
             // Fork before the first message: create an empty session linked to this one
-            const newManager = SessionManager.create(sessionManager.getCwd(), sessionDir);
-            newManager.newSession({ parentSession: currentSessionFile });
-            newSessionFile = newManager.getSessionFile() as string;
+            forkedManager = SessionManager.create(sessionManager.getCwd(), sessionDir, {
+              parentSession: currentSessionFile,
+            });
+            newSessionFile = forkedManager.getSessionFile() as string;
           } else {
             // Fork after some history: copy path up to (but not including) the fork point
-            const sourceManager = SessionManager.open(currentSessionFile, sessionDir);
-            const forkedPath = sourceManager.createBranchedSession(entry.parentId);
+            forkedManager = SessionManager.open(currentSessionFile, sessionDir);
+            const forkedPath = forkedManager.createBranchedSession(entry.parentId);
             if (!forkedPath) throw new Error("Failed to create forked session");
             newSessionFile = forkedPath;
           }
 
-          const newSessionId = SessionManager.open(newSessionFile, sessionDir).getSessionId();
+          if (!existsSync(newSessionFile)) {
+            const header = forkedManager.getHeader();
+            if (!header) throw new Error("Forked session is missing a session header");
+            const content = [header, ...forkedManager.getEntries()]
+              .map((forkedEntry) => JSON.stringify(forkedEntry))
+              .join("\n") + "\n";
+            writeFileSync(newSessionFile, content, { encoding: "utf8", flag: "wx" });
+          }
+
+          const newSessionId = forkedManager.getSessionId();
           cacheSessionPath(newSessionId, newSessionFile);
           invalidateSessionListCache();
           await this.shutdownAfterSessionReplacement("fork");
@@ -1146,6 +1182,8 @@ export class AgentSessionWrapper {
     if (!this._alive) return;
     this._alive = false;
     this.imageAbortController?.abort(new DOMException("Session destroyed", "AbortError"));
+    // Tell attached SSE listeners to reconnect rather than retaining a dead wrapper.
+    this.emit({ type: "session_shutdown" });
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.inner.isBashRunning) this.inner.abortBash();
     this.unsubscribe?.();
@@ -1153,6 +1191,7 @@ export class AgentSessionWrapper {
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
+    this.activeToolEvents.clear();
     this.clearExtensionWidgets(false);
 
     const finishDispose = () => {
@@ -1988,13 +2027,15 @@ function runtimeMessageActivityMs(entry: SessionMessageEntry): number | undefine
  * the first JSONL flush until an assistant message exists, so an accepted new
  * prompt must temporarily be described from its in-memory SessionManager.
  */
-export function getRpcSessionInfos(includeEmpty = false): DeletionSessionInfo[] {
+export function getRpcSessionInfos(options: boolean | { includeTransient?: boolean } = {}): DeletionSessionInfo[] {
+  const includeEmpty = typeof options === "boolean" ? options : Boolean(options.includeTransient);
   const sessions: DeletionSessionInfo[] = [];
   const pathIds = new Map([...getRegistry().values()].filter((s) => s.sessionFile).map((s) => [sessionPathKey(s.sessionFile), s.sessionId]));
   for (const session of getRegistry().values()) {
-    if (!session.isAlive()) continue;
+    if (typeof session.isAlive !== "function" || !session.isAlive()) continue;
 
-    const manager = session.inner.sessionManager;
+    const manager = session.inner?.sessionManager;
+    if (!manager) continue;
     const header = manager.getHeader();
     const entries = manager.getEntries() as unknown as Array<
       { type: string; timestamp: string } | SessionMessageEntry
@@ -2063,6 +2104,7 @@ export async function shutdownSessionsForDeletion(ids: ReadonlySet<string>): Pro
       throw new SessionDeletionConflict("Session predates the deletion update; stop it and reload the session before deleting");
     }
   }
+  cancelQueuedSubagentsForDeletion(ids);
   const results = await Promise.allSettled([...ids].map(async (id) => {
     const wrapper = getRegistry().get(id);
     if (!wrapper) return;
@@ -2299,11 +2341,13 @@ export async function startRpcSession(
       inner.setActiveToolsByName(withExtensionTools(inner, selectedToolNames ?? inner.getActiveToolNames()));
     }
 
-    const exactSystemPrompt = chatOnly
-      ? subagentResources
-        ? () => subagentResources.appendSystemPrompt[0] ?? ""
-        : () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
-      : undefined;
+    const exactSystemPrompt = subagentResources?.exactSystemPrompt !== undefined
+      ? () => subagentResources.exactSystemPrompt!
+      : chatOnly
+        ? subagentResources
+          ? () => subagentResources.appendSystemPrompt[0] ?? ""
+          : () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
+        : undefined;
     const wrapper = new AgentSessionWrapper(inner, {
       exactSystemPrompt,
       chatOnly,
