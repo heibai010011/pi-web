@@ -30,7 +30,10 @@ export async function GET(
     const sm = liveRpc?.inner.sessionManager ?? SessionManager.open(filePath!);
     // `before` is the oldest entry already on the client; fetch its ancestors
     // only (excludeLeaf) so prepending the page does not duplicate `before`.
-    const context = buildSessionContext(sm.getEntries() as never, before ?? leafId, {
+    // Omitted leaf means the manager's active branch, not the last entry in the
+    // file. Preserve null: editing the first user message leaves an empty root.
+    const activeLeafId = leafId ?? sm.getLeafId();
+    const context = buildSessionContext(sm.getEntries() as never, before ?? activeLeafId, {
       deferThinking,
       deferToolResultImages,
       tail,
@@ -38,7 +41,7 @@ export async function GET(
       sessionId: id,
     });
 
-    return NextResponse.json({ context, tail, before: before ?? null });
+    return NextResponse.json({ context, leafId: activeLeafId, tail, before: before ?? null });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

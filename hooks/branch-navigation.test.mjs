@@ -316,6 +316,25 @@ test("obsolete completion cannot release the latest selection's pagination gate"
   assert.equal(s.ui.branchNavigationBlocked, false);
 });
 
+for (const actualLeaf of ["parent-assistant", null]) test(`edit reloads actual backend leaf ${actualLeaf} before resending`, async () => {
+  const s = setup();
+  const edited = { role: "user", content: "same text" };
+  const pending = s.navigate("edited-user"); await flush();
+  s.commands[0].resolve(); await flush();
+  const url = new URL(s.reads[0].url, "http://fixture");
+  assert.equal(url.searchParams.has("leafId"), false, "must not reload the edited user entry");
+  const history = actualLeaf ? [{ role: "assistant", content: "prior answer" }] : [];
+  s.reads[0].resolve({ ok: true, json: async () => ({
+    leafId: actualLeaf,
+    context: { messages: history, entryIds: actualLeaf ? [actualLeaf] : [], oldestEntryId: actualLeaf, hasMore: false },
+  }) });
+  assert.equal(await pending, true);
+  assert.equal(s.ui.leaf, actualLeaf);
+  assert.deepEqual(s.ui.messages, history);
+  // Sending appends exactly one optimistic bubble to the loaded history.
+  assert.equal([...s.ui.messages, edited].filter(m => m.content === edited.content).length, 1);
+});
+
 test("active prompt refuses new branch mutations", async () => {
   const s = setup(); s.context.agentRunningRef.current = true;
   await s.select("A"); await s.navigate("B");

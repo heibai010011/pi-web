@@ -725,7 +725,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
       const res = await fetch(url, { signal: options?.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as { context: SessionData["context"] };
+      const d = await res.json() as { context: SessionData["context"]; leafId?: string | null };
       if (sessionIdRef.current !== sid || options?.signal?.aborted || !sessionHookMountedRef.current) return;
       if (reloadSeqRef.current !== seq) return;
       setHistoryCursor(d.context.oldestEntryId);
@@ -749,6 +749,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setEntryIds((prev) => [...d.context.entryIds, ...prev]);
         entryIdsRef.current = [...d.context.entryIds ?? [], ...entryIdsRef.current];
       } else {
+        if (d.leafId !== undefined) setActiveLeafId(d.leafId);
         setMessages(d.context.messages);
         setEntryIds(d.context.entryIds ?? []);
         entryIdsRef.current = d.context.entryIds ?? [];
@@ -2173,7 +2174,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       try {
         await mutation;
         if (!isCurrentSelection()) return;
-        const context = await loadContext(sid, leafId);
+        // navigateTree rewinds user targets to their parent (or the empty root).
+        // Read the actual backend leaf, not the clicked message we are editing.
+        const context = await loadContext(sid, null);
         if (!isCurrentSelection()) return;
         if (!context) throw new Error("Unable to load the selected branch. Select the branch again before sending.");
         branchNavigationFailedRef.current = false;
