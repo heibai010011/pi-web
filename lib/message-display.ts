@@ -10,7 +10,14 @@ export function getThinkingPreview(thinking: string): string {
 
 export function isMessageGroupAnchor(message: { role?: AgentMessage["role"]; customType?: string }): boolean {
   return message.role === "user"
-    || (message.role === "custom" && message.customType === "compaction");
+    || (message.role === "custom" && (
+      message.customType === "compaction"
+      // Background results start a fresh parent continuation. Without a boundary,
+      // the last short follow-up hides the earlier full answer and all receipts
+      // inside the original user's collapsed processing group.
+      || message.customType === "pi-web:subagent-notification"
+      || message.customType === "pi-web:subagent-delivery-error"
+    ));
 }
 
 export function isEmptyThinkingBlock(block: AssistantContentBlock, options: DisplayOptions = {}): block is ThinkingContent {

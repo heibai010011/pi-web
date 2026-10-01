@@ -32,7 +32,7 @@ import {
   type SubagentRunInfo,
 } from "./subagents";
 import type { SessionEntry } from "./types";
-import { buildSubagentPromptPlan } from "./subagent-prompt";
+import { buildSubagentPromptPlan, withSubagentReportContract } from "./subagent-prompt";
 import { appendSubagentInputFiles, loadSubagentInputFiles } from "./subagent-input";
 import { projectTrustReloadOptions } from "./project-trust";
 import { resolveShellTools } from "./powershell-settings";
@@ -570,7 +570,7 @@ export function createSubagentController(
       request.onUpdate?.(stored.run);
       let result: SubagentRunInfo;
       try {
-        await wrapper!.inner.prompt(request.task, { source: "rpc" });
+        await wrapper!.inner.prompt(withSubagentReportContract(request.task), { source: "rpc" });
         const text = wrapper!.inner.getLastAssistantText()?.trim();
         const providerError = stored.abortRequested ? undefined : lastAssistantError(manager);
         result = {
@@ -654,7 +654,40 @@ export function createSubagentController(
     await wrapper.inner.steer(message.trim());
   }
 
-  async function notifyParent(run: SubagentRunInfo, retries = 0): Promise<void> {
+  async function notifyParent(run: SubagentRunInfo): Promise<void> {
+    try {
+      await deliverParentNotification(run);
+    } catch (error) {
+      // Report transport/startup failures without triggering another model turn.
+      // Provider failures emitted as assistant errors remain visible through the
+      // normal session error path; accepting a follow-up is not proof of delivery.
+      const blocked = () => isSessionDeletionBlocked(run.sessionId) || isSessionDeletionBlocked(run.parentSessionId);
+      if (blocked()) return;
+      const message = error instanceof Error ? error.message : String(error);
+      const parent = dependencies.getSession(run.parentSessionId);
+      const child = dependencies.getSession(run.sessionId);
+      const target = parent?.isAlive() ? parent : child?.isAlive() ? child : undefined;
+      if (target) {
+        try {
+          await target.waitUntilReady();
+          if (!blocked() && target.isAlive()) {
+            await target.inner.sendCustomMessage({
+              customType: "pi-web:subagent-delivery-error",
+              content: `Could not notify or continue the parent agent for subagent ${run.sessionId}: ${message}\n\nThe subagent result remains in its session. Ask the parent to retrieve it with get_subagent_result and continue; this error does not require rerunning the child task.`,
+              display: true,
+              details: { ...subagentToolDetails(run), error: message },
+            }, { triggerTurn: false });
+          }
+        } catch (reportError) {
+          console.error("[pi-web] failed to record subagent delivery error:", reportError instanceof Error ? reportError.message : reportError);
+        }
+      }
+      // Preserve the existing caller's logging and failure semantics.
+      throw error;
+    }
+  }
+
+  async function deliverParentNotification(run: SubagentRunInfo, retries = 0): Promise<void> {
     const deleted = () => isSessionDeletionBlocked(run.sessionId) || globalThis.__piSessionDeleted?.has(run.parentSessionId);
     if (deleted()) return;
     await waitForSessionDeletion(run.parentSessionId);
@@ -670,11 +703,11 @@ export function createSubagentController(
     await parent.waitUntilReady();
     if (globalThis.__piSessionDeletionBlocked?.has(run.parentSessionId)) {
       await waitForSessionDeletion(run.parentSessionId);
-      if (!deleted() && retries < 3) return notifyParent(run, retries + 1);
+      if (!deleted() && retries < 3) return deliverParentNotification(run, retries + 1);
     }
     if (deleted()) return;
     if (!parent.isAlive()) {
-      if (retries < 3) return notifyParent(run, retries + 1);
+      if (retries < 3) return deliverParentNotification(run, retries + 1);
       throw new Error(`Parent session is no longer available: ${run.parentSessionId}`);
     }
     await parent.inner.sendCustomMessage({

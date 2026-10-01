@@ -290,6 +290,9 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     if ((message as CustomMessage).customType === "compaction") {
       return <CompactionMessageView message={message as CustomMessage} />;
     }
+    if (message.customType === "pi-web:subagent-notification" || message.customType === "pi-web:subagent-delivery-error") {
+      return <SubagentNotificationView message={message} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />;
+    }
     return <CustomMessageView message={message as CustomMessage} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   if (message.role === "bashExecution") {
@@ -1859,6 +1862,48 @@ function CompactionFileList({ title, files }: { title: string; files: string[] }
         ))}
       </ul>
     </div>
+  );
+}
+
+function SubagentNotificationView({ message, cwd, onOpenFile, onOpenSession }: {
+  message: CustomMessage;
+  cwd?: string;
+  onOpenFile?: (filePath: string, page?: number) => void;
+  onOpenSession?: (sessionId: string) => void;
+}) {
+  const { t } = useI18n();
+  // Historical notifications may omit kind or newer metadata. Read each field
+  // independently so malformed extension data cannot become a React child.
+  const details = message.details && typeof message.details === "object" && !Array.isArray(message.details)
+    ? message.details as Record<string, unknown> : {};
+  const field = (key: string) => typeof details[key] === "string" ? (details[key] as string).trim() : "";
+  const sessionId = field("sessionId");
+  const description = field("description") || t("subagent.notification.taskFallback");
+  const status = field("status");
+  const knownStatuses = ["queued", "starting", "running", "completed", "failed", "aborted", "interrupted"];
+  const statusLabel = knownStatuses.includes(status) ? t(`agentSwitcher.status.${status}`) : t("subagent.notification.statusUnknown");
+  const isDeliveryError = message.customType === "pi-web:subagent-delivery-error";
+  const error = field("error");
+  const text = getMessageText(message.content);
+
+  return (
+    <details open={isDeliveryError} style={{ marginBottom: 10, border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-panel)", fontSize: 12 }}>
+      <summary style={{ padding: "7px 10px", cursor: "pointer", color: isDeliveryError ? "var(--error, #dc2626)" : "var(--text-muted)", overflowWrap: "anywhere" }}>
+        <strong>{isDeliveryError ? t("subagent.notification.deliveryError") : t("subagent.notification.title")}</strong>
+        {" · "}{description}{" · "}{t("subagent.notification.childStatus", { status: statusLabel })}
+      </summary>
+      <div style={{ padding: "6px 10px 10px", borderTop: "1px solid var(--border)", overflowWrap: "anywhere" }}>
+        {isDeliveryError && <p style={{ margin: "4px 0 8px", color: "var(--text-muted)" }}>{t("subagent.notification.recovery")}</p>}
+        {error && <p style={{ margin: "4px 0 8px", whiteSpace: "pre-wrap", color: "var(--error, #dc2626)" }}>{error}</p>}
+        {sessionId && onOpenSession && (
+          <button type="button" onClick={() => onOpenSession(sessionId)} style={{ marginBottom: 8, padding: "3px 7px", border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg)", color: "var(--accent)", cursor: "pointer" }}>
+            {t("subagent.open")}
+          </button>
+        )}
+        {!isDeliveryError && <div style={{ color: "var(--text-dim)", marginBottom: 4 }}>{t("subagent.notification.childReport")}</div>}
+        {text ? <SafeMarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile}>{text}</SafeMarkdownBody> : <span style={{ color: "var(--text-dim)" }}>{t("i18n.noMessage")}</span>}
+      </div>
+    </details>
   );
 }
 

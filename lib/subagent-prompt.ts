@@ -5,6 +5,11 @@ export interface SubagentPromptPlan {
   exactSystemPrompt?: string;
 }
 
+export function withSubagentReportContract(task: string): string {
+  const instruction = "Final report to the parent: make it self-contained, with findings, supporting evidence, artifact paths when applicable, verification performed (or not performed), and unresolved items or limitations. Keep the detail proportionate to the task and respect any requested output format.";
+  return `${task}\n\n${instruction}`;
+}
+
 export function buildSubagentPromptPlan(options: {
   profileSystemPrompt: string;
   tools: readonly string[];
@@ -20,12 +25,14 @@ export function buildSubagentPromptPlan(options: {
   if (options.inheritedParentContext && !chatOnly) {
     appendSystemPrompt.push(options.inheritedParentContext);
   }
+  const taskWithContext = options.inheritedParentContext && chatOnly
+    ? `${options.task}\n\n${options.inheritedParentContext}`
+    : options.task;
+  // Keep custom/replace system prompts exact; reporting belongs to the delegated task.
   return {
     chatOnly,
     appendSystemPrompt,
-    delegatedTask: options.inheritedParentContext && chatOnly
-      ? `${options.task}\n\n${options.inheritedParentContext}`
-      : options.task,
+    delegatedTask: withSubagentReportContract(taskWithContext),
     ...(chatOnly || replacePrompt ? { exactSystemPrompt: options.profileSystemPrompt } : {}),
   };
 }

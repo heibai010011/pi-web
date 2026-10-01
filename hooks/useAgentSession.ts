@@ -582,19 +582,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } satisfies SessionStatsInfo;
   }, [messages, sessionStatsOverride, contextUsage, data?.context.messages, data?.filePath, data?.totalActiveMs, data?.stats, session?.id, session?.name]);
 
-  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, options?: { force?: boolean }) => {
+  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, options?: { force?: boolean; runId?: number }) => {
     let messagesLoaded = false;
     // Reload timing barrier shared with loadContext. Many paths call loadSession
     // concurrently (agent_end, prompt_done, agent_settled, compaction_end, slash
     // commands, model switches); a slower earlier response must not overwrite a
     // newer snapshot with stale messages.
     const seq = ++reloadSeqRef.current;
+    const runIsCurrent = () => options?.runId === undefined || promptRunIdRef.current === options.runId;
     try {
       if (showLoading) setLoading(true);
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
       if (options?.force) params.set("force", "1");
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`);
       if (sessionIdRef.current !== sid || reloadSeqRef.current !== seq) return null;
+      if (!sessionHookMountedRef.current || !runIsCurrent()) return null;
       if (res.status === 404) {
         if (showLoading) {
           setData(null);
@@ -613,6 +615,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as SessionData;
       if (sessionIdRef.current !== sid || reloadSeqRef.current !== seq) return null;
+      if (!sessionHookMountedRef.current || !runIsCurrent()) return null;
       const persistedMessages = d.context.messages;
       setData(d);
       setActiveLeafId(d.leafId);
@@ -679,6 +682,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
         const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
         if (sessionIdRef.current !== sid || reloadSeqRef.current !== seq) return null;
+        if (!sessionHookMountedRef.current || !runIsCurrent()) return null;
 
         const liveState = agentState.state;
         syncLiveModel(liveState);
@@ -698,7 +702,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return null;
       }
     } catch (e) {
-      if (sessionIdRef.current === sid && reloadSeqRef.current === seq) setError(String(e));
+      if (sessionHookMountedRef.current && runIsCurrent() && sessionIdRef.current === sid && reloadSeqRef.current === seq) setError(String(e));
       return null;
     } finally {
       // A StrictMode replay (or newer reload) owns loading now. Releasing it
@@ -706,6 +710,31 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (showLoading && !messagesLoaded && sessionIdRef.current === sid && reloadSeqRef.current === seq) setLoading(false);
     }
   }, [setToolPresetState, syncLiveModel]);
+
+  // Idle custom messages and reconnects are persistence notifications, not new
+  // streaming turns. Coalesce bursts and replace from the authoritative tail
+  // rather than appending events which may already be present in history.
+  const idleReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestIdleHistory = useCallback(() => {
+    if (idleReloadTimerRef.current !== null || agentRunningRef.current) return;
+    const sid = sessionIdRef.current;
+    const runId = promptRunIdRef.current;
+    const reloadSeq = reloadSeqRef.current;
+    if (!sid) return;
+    idleReloadTimerRef.current = setTimeout(() => {
+      idleReloadTimerRef.current = null;
+      if (!sessionHookMountedRef.current || sessionIdRef.current !== sid
+        || agentRunningRef.current || promptRunIdRef.current !== runId
+        || reloadSeqRef.current !== reloadSeq
+        || branchNavigationRef.current || branchNavigationFailedRef.current) return;
+      void loadSession(sid, false, false, { runId });
+    }, 50);
+  }, [loadSession]);
+
+  useEffect(() => () => {
+    if (idleReloadTimerRef.current !== null) clearTimeout(idleReloadTimerRef.current);
+    idleReloadTimerRef.current = null;
+  }, [session?.id]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null, before?: string | null, options?: { tail?: number; signal?: AbortSignal }) => {
     // Paging the old displayed history must not supersede the selected branch's
@@ -993,6 +1022,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [closeEvents, maintainEventsConnected, session?.id]);
 
+  // No idle polling or extra SSE: the selected session already owns a warm
+  // connection. Foreground/network recovery also catches a completed wake that
+  // occurred while the browser suspended an otherwise half-open stream.
+  useEffect(() => {
+    const recover = () => {
+      const sid = sessionIdRef.current;
+      if (document.visibilityState !== "visible" || !sid || sessionPropIdRef.current !== sid) return;
+      maintainEventsConnected(sid);
+      requestIdleHistory();
+    };
+    document.addEventListener("visibilitychange", recover);
+    window.addEventListener("online", recover);
+    return () => {
+      document.removeEventListener("visibilitychange", recover);
+      window.removeEventListener("online", recover);
+    };
+  }, [maintainEventsConnected, requestIdleHistory]);
+
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
     response: { value: string } | { confirmed: boolean } | { cancelled: true },
@@ -1182,9 +1229,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // must not overwrite the messages of the run currently streaming.
     if (promptRunIdRef.current !== runId) return;
     try {
-      if (sid) await loadSession(sid);
+      if (sid) await loadSession(sid, false, false, { runId });
     } finally {
-      if (promptRunIdRef.current !== runId) return;
+      if (!sessionHookMountedRef.current || sessionIdRef.current !== sid || promptRunIdRef.current !== runId) return;
       const promptWasPending = rpcPromptPendingRef.current;
       const agentWasActive = sdkAgentActiveRef.current;
       rpcPromptPendingRef.current = false;
@@ -1383,13 +1430,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // snapshot to restore, so ending here would permanently drop the live
         // streaming bubble.
         if (event.isStreaming === true) {
+          if (!agentRunningRef.current) promptRunIdRef.current += 1;
           cancelEventStreamGrace();
           sdkAgentActiveRef.current = true;
           agentRunningRef.current = true;
           setAgentRunning(true);
           setAgentPhase({ kind: "waiting_model" });
+        } else if (agentRunningRef.current) {
+          // A handshake only describes SDK streaming, not prompt admission or
+          // extension settlement. Verify before clearing an active local run.
+          const sid = sessionIdRef.current;
+          if (sid) void reconcileAgentState(sid);
         } else {
           dispatch({ type: "end" });
+          requestIdleHistory();
         }
         break;
       }
@@ -1412,6 +1466,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "agent_start":
+        // Autonomous extension turns have no local handleSend to allocate an
+        // epoch. Fence slow idle/previous-run responses, but not retries within
+        // an already-active logical prompt.
+        if (!agentRunningRef.current) promptRunIdRef.current += 1;
         promptAdmissionPendingRunRef.current = null;
         cancelEventStreamGrace();
         sdkAgentActiveRef.current = true;
@@ -1544,7 +1602,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Same late-event guard: after reconcile finished this run,
         // loadSession already loaded this message from the session file —
         // appending it again would duplicate it.
-        if (!agentRunningRef.current) break;
+        if (!agentRunningRef.current) {
+          const completed = event.message as AgentMessage | undefined;
+          // Delivery errors/notifications can be persisted without agent_start.
+          // Do not loosen the guard for buffered assistant/user events.
+          if (completed?.role === "custom") requestIdleHistory();
+          break;
+        }
         const completed = event.message as AgentMessage | undefined;
         if (completed && completed.role === "user") {
           // Delivered steering/follow-up messages surface here as user
@@ -1669,7 +1733,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setExtensionDialog((current) => current?.id === event.id ? null : current);
         break;
     }
-  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, scheduleEventStreamClose, scrollToBottom, settleUiStage, syncLiveModel]);
+  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, reconcileAgentState, requestIdleHistory, scheduleEventStreamClose, scrollToBottom, settleUiStage, syncLiveModel]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {

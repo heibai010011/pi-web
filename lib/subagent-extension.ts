@@ -139,6 +139,9 @@ export function createSubagentExtension(
           "Use Agent for a focused task that benefits from an isolated context.",
           "Use multiple background Agent calls in the same response for independent parallel work.",
           "Do not duplicate work already delegated to a running subagent.",
+          "You own integration of subagent results and the final user-facing answer; a completion notification is not delivery of the user's requested outcome.",
+          "Before claiming completion, review relevant subagent results and account honestly for pending, failed, or unresolved tasks; resolve them or clearly state their impact and limits.",
+          "Wait for subagent work only when it is needed for the current request; do not blindly wait for unrelated background work.",
         ],
         executionMode: "parallel",
         parameters: Type.Object({

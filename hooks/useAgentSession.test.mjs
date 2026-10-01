@@ -1,11 +1,71 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import ts from "typescript";
 
 const source = await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8");
 const chatWindowSource = await readFile(new URL("../components/ChatWindow.tsx", import.meta.url), "utf8");
 const chatInputSource = await readFile(new URL("../components/ChatInput.tsx", import.meta.url), "utf8");
 const appShellSource = await readFile(new URL("../components/AppShell.tsx", import.meta.url), "utf8");
+
+// Execute the actual narrowly scoped callback with fake refs/timers, not a
+// duplicate algorithm (the rest of this file also checks hook wiring).
+function idleHistoryHarness() {
+  const start = source.indexOf("  const requestIdleHistory = useCallback");
+  const end = source.indexOf("  }, [loadSession]);", start) + "  }, [loadSession]);".length;
+  const refs = {
+    idleReloadTimerRef: { current: null }, agentRunningRef: { current: false },
+    sessionIdRef: { current: "parent" }, promptRunIdRef: { current: 3 },
+    reloadSeqRef: { current: 9 }, sessionHookMountedRef: { current: true },
+    branchNavigationRef: { current: null }, branchNavigationFailedRef: { current: false },
+  };
+  const timers = [];
+  const loads = [];
+  const dependencies = {
+    ...refs, useCallback: (fn) => fn,
+    setTimeout: (fn) => { timers.push(fn); return timers.length; },
+    loadSession: (...args) => loads.push(args),
+  };
+  const js = ts.transpile(source.slice(start, end), { target: ts.ScriptTarget.ES2022 });
+  const request = new Function(...Object.keys(dependencies), `${js}; return requestIdleHistory;`)(...Object.values(dependencies));
+  return { refs, timers, loads, request };
+}
+
+test("idle history coalesces custom/reconnect bursts without appending or starting runs", () => {
+  const h = idleHistoryHarness();
+  h.request(); h.request(); h.request();
+  assert.equal(h.timers.length, 1);
+  h.timers.shift()();
+  assert.deepEqual(h.loads, [["parent", false, false, { runId: 3 }]]);
+  assert.equal(h.refs.agentRunningRef.current, false);
+  h.request();
+  assert.equal(h.timers.length, 1);
+});
+
+test("queued idle recovery yields to runs, newer reloads, branches and disposal", () => {
+  for (const [key, value] of [
+    ["agentRunningRef", true], ["promptRunIdRef", 4], ["reloadSeqRef", 10],
+    ["sessionIdRef", "other"], ["sessionHookMountedRef", false],
+    ["branchNavigationRef", {}], ["branchNavigationFailedRef", true],
+  ]) {
+    const h = idleHistoryHarness();
+    h.request();
+    h.refs[key].current = value;
+    h.timers.shift()();
+    assert.equal(h.loads.length, 0, key);
+  }
+});
+
+test("reconnect and custom idle messages recover history without reviving buffered messages", () => {
+  const connected = source.slice(source.indexOf('case "connected"'), source.indexOf('case "image_generation_start"'));
+  const ended = source.slice(source.indexOf('case "message_end"'), source.indexOf('case "tool_execution_start"'));
+  assert.match(connected, /else if \(agentRunningRef.current\)[\s\S]*reconcileAgentState\(sid\)/);
+  assert.match(connected, /requestIdleHistory\(\)/);
+  assert.match(ended, /if \(!agentRunningRef.current\)[\s\S]*completed\?\.role === "custom"\) requestIdleHistory\(\);\s*break;/);
+  assert.match(source, /const runIsCurrent = \(\) => options\?\.runId === undefined \|\| promptRunIdRef.current === options.runId/);
+  assert.equal(source.split("!runIsCurrent()").length - 1, 3);
+  assert.match(source, /case "agent_start":[\s\S]*if \(!agentRunningRef.current\) promptRunIdRef.current \+= 1/);
+});
 
 test("keeps the session event stream open through the idle grace window", () => {
   const finishSource = source.slice(
@@ -152,7 +212,7 @@ test("only the session-mount load probes disk for external appends", () => {
     source.indexOf("// Load session on mount"),
     source.indexOf("sessionHookMountedRef.current = false"),
   );
-  assert.match(loadSessionSource, /options\?: \{ force\?: boolean \}/);
+  assert.match(loadSessionSource, /options\?: \{ force\?: boolean; runId\?: number \}/);
   assert.match(loadSessionSource, /if \(options\?\.force\) params\.set\("force", "1"\)/);
   assert.match(loadSessionSource, /d\.wrapperRebuilt[\s\S]*?eventConnectionRef\.current\?\.close\(\)[\s\S]*?maintain\(sid\)/);
   assert.match(mountSource, /loadSession\(session\.id, true, true, \{ force: true \}\)/);
@@ -170,7 +230,7 @@ test("first user messages expose both branch actions and edit before their own e
   assert.doesNotMatch(chatWindowSource, /idx === 0 && msg\.role === "user"/);
   assert.doesNotMatch(chatWindowSource, /prevAssistantEntryId/);
   assert.match(navigateSource, /type: "navigate_tree",\s*targetId: leafId/);
-  assert.match(navigateSource, /await loadContext\(sid, leafId\)/);
+  assert.match(navigateSource, /await loadContext\(sid, null\)/);
   assert.match(navigateSource, /return await handleLeafChange\(entryId\)/);
   assert.match(navigateSource, /return isCurrentSelection\(\) && !branchNavigationFailedRef\.current/);
 });
