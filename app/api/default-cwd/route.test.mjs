@@ -7,82 +7,66 @@ import ts from "typescript";
 const source = await readFile(new URL("./route.ts", import.meta.url), "utf8");
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
 
-test("default cwd grants only the created directory before returning it", async () => {
+function loadRoute({ defaultCwdPath, mkdirSync }) {
+  const exports = {};
+  const dependencies = {
+    "next/server": { NextResponse: { json: (body, options) => ({ body, status: options?.status ?? 200 }) } },
+    fs: { mkdirSync },
+    "@/lib/default-cwd": { defaultCwdPath },
+  };
+  vm.runInNewContext(compiled, { exports, require: name => {
+    // Creation must not grant a broad root itself: selection and authorization
+    // now go through /api/cwd/validate, just like a user-selected directory.
+    assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`);
+    return dependencies[name];
+  } });
+  return exports;
+}
+
+test("default cwd creates only the helper's dated directory and leaves authorization to validation", async () => {
   const calls = [];
-  const exports = {};
-  const dependencies = {
-    "next/server": { NextResponse: { json: body => ({ body, status: 200 }) } },
-    fs: { mkdirSync: (dir, options) => {
+  let dir = "/fixture-home/pi-cwd/20260102";
+  const { POST } = loadRoute({
+    defaultCwdPath: () => dir,
+    mkdirSync: (path, options) => {
       assert.equal(options.recursive, true);
-      calls.push(["mkdir", dir]);
-    } },
-    os: { homedir: () => "/fixture-home" },
-    path: { join: (...parts) => parts.join("/") },
-    "@/lib/file-access": { allowFileRoot: dir => calls.push(["allow", dir]) },
-  };
-  let now = "2026-01-02T12:00:00.000Z";
-  class FixedDate extends Date {
-    constructor() { super(now); }
+      calls.push(path);
+    },
+  });
+  for (const expected of [dir, dir, "/fixture-home/pi-cwd/20260103"]) {
+    dir = expected;
+    const response = await POST();
+    assert.equal(response.status, 200);
+    assert.equal(response.body.cwd, expected);
   }
-  vm.runInNewContext(compiled, { exports, Date: FixedDate, require: name => {
-    assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`);
-    return dependencies[name];
-  } });
-  const response = await exports.POST();
-  assert.equal(response.status, 200);
-  assert.equal(response.body.cwd, "/fixture-home/pi-cwd-20260102");
-  assert.deepEqual(calls, [["mkdir", response.body.cwd], ["allow", response.body.cwd]]);
-  const repeated = await exports.POST();
-  assert.equal(repeated.status, 200);
-  assert.equal(repeated.body.cwd, response.body.cwd);
-  assert.deepEqual(calls.slice(2), [["mkdir", response.body.cwd], ["allow", response.body.cwd]]);
-  now = "2026-01-03T00:00:00.000Z";
-  const nextDay = await exports.POST();
-  assert.equal(nextDay.status, 200);
-  assert.equal(nextDay.body.cwd, "/fixture-home/pi-cwd-20260103");
-  assert.deepEqual(calls.slice(4), [["mkdir", nextDay.body.cwd], ["allow", nextDay.body.cwd]]);
+  assert.deepEqual(calls, ["/fixture-home/pi-cwd/20260102", "/fixture-home/pi-cwd/20260102", "/fixture-home/pi-cwd/20260103"]);
 });
 
-test("default cwd never reports success when authorization fails", async () => {
-  const exports = {};
-  const dependencies = {
-    "next/server": { NextResponse: { json: (body, options) => ({ body, status: options?.status ?? 200 }) } },
-    fs: { mkdirSync: () => {} },
-    os: { homedir: () => "/fixture-home" },
-    path: { join: (...parts) => parts.join("/") },
-    "@/lib/file-access": { allowFileRoot: () => { throw new Error("fixture authorization failed"); } },
-  };
-  vm.runInNewContext(compiled, { exports, require: name => {
-    assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`);
-    return dependencies[name];
-  } });
-  const response = await exports.POST();
+test("default cwd never reports success when path resolution fails", async () => {
+  let created = false;
+  const { POST } = loadRoute({
+    defaultCwdPath: () => { throw new Error("fixture path failed"); },
+    mkdirSync: () => { created = true; },
+  });
+  const response = await POST();
   assert.equal(response.status, 500);
-  assert.match(response.body.error, /fixture authorization failed/);
+  assert.match(response.body.error, /fixture path failed/);
   assert.equal(response.body.cwd, undefined);
+  assert.equal(created, false);
 });
 
-test("default cwd creation failure never grants file access", async () => {
-  const granted = [];
+test("default cwd creation failure returns no selectable cwd and can recover", async () => {
   let failCreation = true;
-  const exports = {};
-  const dependencies = {
-    "next/server": { NextResponse: { json: (body, options) => ({ body, status: options?.status ?? 200 }) } },
-    fs: { mkdirSync: () => { if (failCreation) throw new Error("fixture mkdir denied"); } },
-    os: { homedir: () => "/fixture-home" },
-    path: { join: (...parts) => parts.join("/") },
-    "@/lib/file-access": { allowFileRoot: value => granted.push(value) },
-  };
-  vm.runInNewContext(compiled, { exports, require: name => {
-    assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`);
-    return dependencies[name];
-  } });
-  const response = await exports.POST();
+  const { POST } = loadRoute({
+    defaultCwdPath: () => "/fixture-home/pi-cwd/20260102",
+    mkdirSync: () => { if (failCreation) throw new Error("fixture mkdir denied"); },
+  });
+  const response = await POST();
   assert.equal(response.status, 500);
   assert.match(response.body.error, /fixture mkdir denied/);
-  assert.deepEqual(granted, []);
+  assert.equal(response.body.cwd, undefined);
   failCreation = false;
-  const recovered = await exports.POST();
+  const recovered = await POST();
   assert.equal(recovered.status, 200);
-  assert.deepEqual(granted, [recovered.body.cwd]);
+  assert.equal(recovered.body.cwd, "/fixture-home/pi-cwd/20260102");
 });

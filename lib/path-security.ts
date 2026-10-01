@@ -2,11 +2,7 @@ import { realpathSync } from "fs";
 import path from "path";
 import { isWindowsAbsolutePath } from "./paths";
 
-/**
- * Lexical containment check. Accepts either canonical form on both sides: it
- * re-resolves through path.win32/path.posix and case-folds on Windows, so
- * separator style and drive-letter case never decide the answer.
- */
+/** Lexical containment with Windows namespace, separator and case normalization. */
 export function isPathWithinRoots(target: string, roots: Set<string>): boolean {
   for (const root of roots) {
     const useWindowsRules = isWindowsAbsolutePath(target) || isWindowsAbsolutePath(root);
@@ -22,14 +18,8 @@ export function isPathWithinRoots(target: string, roots: Set<string>): boolean {
   return false;
 }
 
-export function isExistingPathWithinRoots(target: string, roots: Set<string>): boolean {
-  let realTarget: string;
-  try {
-    realTarget = realpathSync.native(target);
-  } catch {
-    return false;
-  }
-
+/** The roots after resolving symbolic links, for comparing canonical paths. */
+export function resolveRealRoots(roots: Set<string>): Set<string> {
   const realRoots = new Set<string>();
   for (const root of roots) {
     try {
@@ -38,10 +28,22 @@ export function isExistingPathWithinRoots(target: string, roots: Set<string>): b
       // Ignore stale roots derived from removed sessions or worktrees.
     }
   }
-  // realpath can retain a Windows namespace prefix depending on its input.
-  // Canonicalize both resolved sides rather than comparing mixed path forms.
-  if (process.platform === "win32") {
-    return isPathWithinRoots(path.toNamespacedPath(realTarget), new Set([...realRoots].map(root => path.toNamespacedPath(root))));
+  return realRoots;
+}
+
+/** Reject parent segments before normalization can hide traversal through a link. */
+export function hasParentDirectorySegment(target: string): boolean {
+  const separator = process.platform === "win32" || isWindowsAbsolutePath(target) ? /[\\/]/ : "/";
+  return target.split(separator).includes("..");
+}
+
+export function isExistingPathWithinRoots(target: string, roots: Set<string>): boolean {
+  if (hasParentDirectorySegment(target)) return false;
+  let realTarget: string;
+  try {
+    realTarget = realpathSync.native(target);
+  } catch {
+    return false;
   }
-  return isPathWithinRoots(realTarget, realRoots);
+  return isPathWithinRoots(realTarget, resolveRealRoots(roots));
 }

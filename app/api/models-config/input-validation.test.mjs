@@ -13,7 +13,7 @@ test("models config rejects malformed JSON and nonobjects without writes", async
   let writeFailure = new Error("fixture storage failure");
   vm.runInNewContext(compiled, { exports, require: name => {
     if (name === "next/server") return { NextResponse: { json: (body, options) => ({ body, status: options?.status ?? 200 }) } };
-    if (name === "@/lib/models-config-store") return { writeModelsConfig: body => {
+    if (name === "@/lib/models-config-store") return { ModelsConfigReadError: class ModelsConfigReadError extends Error {}, writeModelsConfig: body => {
       writeAttempts++;
       if (failWrite) throw writeFailure;
       writes.push(body);

@@ -41,7 +41,7 @@ function toolCallBlock(toolCallId: string, request: ImageGenerationRequest) {
       ...(request.aspectRatio ? { aspect_ratio: request.aspectRatio } : {}),
       ...(count > 1 ? { count } : {}),
       ...(request.seed !== undefined ? { seed: request.seed } : {}),
-    } as Record<string, unknown>,
+    },
   };
 }
 
@@ -107,7 +107,7 @@ export function appendImageGenerationTurn(
       ...imageBlocks,
       { type: "text" as const, text: summaryText },
     ],
-    details: imageGenerationToolDetails(request, durationMs, "composer"),
+    details: { ...imageGenerationToolDetails(request, durationMs, "composer") },
     isError,
     timestamp: now,
   });

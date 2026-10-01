@@ -41,7 +41,7 @@ function setup({ existing = false } = {}) {
     console: { error() {} }, crypto: webcrypto,
     isNew: !existing, newSessionCwd: existing ? null : "/fixture", newSessionModel: null,
     session: existing ? { id: "existing" } : null, composerDraftKey: "draft",
-    newSessionDraftKey: "draft", modelList: [], toolPreset: "default",
+    newSessionDraftKey: "draft", modelList: [], toolPreset: "default", editEntryId: null,
     fetch: async () => { startupEntered.resolve(); return startup.promise; },
     getToolNamesForPreset: () => [], claimSessionFolderDraft() {}, promoteSessionFolderDraft() {},
     setNewSessionModel() {}, setPendingModel() {}, setNewSessionDefaultModel() {}, setThinkingLevel() {},
@@ -66,7 +66,7 @@ function setup({ existing = false } = {}) {
     dispatch: action => { ui.streaming = action.type === "start"; },
   });
   const refs = {
-    branchNavigationRef: null, branchNavigationFailedRef: false, sessionHookMountedRef: true,
+    branchNavigationRef: null, branchNavigationFailedRef: false, sessionHookMountedRef: true, sessionToolsPinnedRef: false,
     agentRunningRef: false, bashRunningRef: false, imageGeneratingRef: false,
     sessionIdRef: existing ? "existing" : null, promptRunIdRef: 0,
     cancelPendingPromptRef: null, cancelPendingBashRef: null, cancelPendingImageRef: null, bashRecoveryIdRef: 0, bashSubmissionIdRef: 0, rpcPromptPendingRef: false,

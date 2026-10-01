@@ -1,4 +1,4 @@
-import { assertSessionNotDeleting, isSessionDeletionBlocked, waitForSessionDeletion } from "./session-deletion-state";
+import { assertSessionNotDeleting, isSessionDeletionBlocked } from "./session-deletion-state";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
   createAgentSessionFromServices,
@@ -11,7 +11,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike } from "./pi-types";
 import {
-  subagentFinalText,
+  subagentNotificationText,
   subagentToolDetails,
   type ResumeSubagentRequest,
   type StartSubagentRequest,
@@ -33,6 +33,7 @@ import {
 } from "./subagents";
 import type { SessionEntry } from "./types";
 import { buildSubagentPromptPlan, withSubagentReportContract } from "./subagent-prompt";
+import { createExactSystemPromptExtension } from "./exact-system-prompt";
 import { appendSubagentInputFiles, loadSubagentInputFiles } from "./subagent-input";
 import { projectTrustReloadOptions } from "./project-trust";
 import { resolveShellTools } from "./powershell-settings";
@@ -80,8 +81,10 @@ declare global {
   var __piSubagentRuns: Map<string, StoredSubagentExecution> | undefined;
   var __piSubagentStarts: Map<Promise<SubagentExecution>, string> | undefined;
   var __piSubagentQueue: SubagentQueue<SubagentRunInfo> | undefined;
+  var __piSubagentConsumedResults: Map<string, string> | undefined;
 }
 const SUBAGENT_CONTEXT_LIMIT = 50_000;
+const PARENT_IDLE_POLL_MS = 200;
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 /** pi's agent loop records provider failures as an assistant message with `stopReason: "error"` and resolves `prompt()` normally; surface that as a failed run. */
@@ -130,6 +133,49 @@ export async function settleSubagentsForDeletion(ids: ReadonlySet<string>): Prom
 function getSubagentQueue(): SubagentQueue<SubagentRunInfo> {
   if (!globalThis.__piSubagentQueue) globalThis.__piSubagentQueue = new SubagentQueue();
   return globalThis.__piSubagentQueue;
+}
+
+type SubagentRunIdentity = Pick<SubagentRunInfo, "sessionId" | "completedAt">;
+
+/**
+ * Background runs whose terminal result the parent already collected with `get_subagent_result`,
+ * keyed by subagent session ID and holding the collected run's `completedAt`. `resume` reruns
+ * the same session ID, so the mark must name the run: a parent that polls *after* a run's
+ * notification was delivered leaves a mark nothing consumes, and a bare session ID would let it
+ * swallow the next run's notification (#987). `resume` deliberately does not clear the entry:
+ * the parent can collect a run and resume it in the same turn while that run's notification is
+ * still held, and the mark must keep suppressing it. Only background runs are recorded — a
+ * foreground run never notifies — and each session holds at most one entry.
+ */
+function getConsumedSubagentResults(): Map<string, string> {
+  // A hot reload can leave the pre-#987 Set on globalThis; replace it rather than call Map methods on it.
+  if (!(globalThis.__piSubagentConsumedResults instanceof Map)) globalThis.__piSubagentConsumedResults = new Map();
+  return globalThis.__piSubagentConsumedResults;
+}
+
+function markResultConsumed(run: SubagentRunIdentity): void {
+  // A terminal run without `completedAt` (interrupted) never notifies, so there is nothing to drop.
+  if (!run.completedAt) return;
+  getConsumedSubagentResults().set(run.sessionId, run.completedAt);
+}
+
+/** Take the mark only when it names this very run; a mark left by an earlier run is ignored. */
+function takeResultConsumed(run: SubagentRunIdentity): boolean {
+  const consumed = getConsumedSubagentResults();
+  if (!run.completedAt || consumed.get(run.sessionId) !== run.completedAt) return false;
+  consumed.delete(run.sessionId);
+  return true;
+}
+
+/**
+ * A run lives in `getSubagentRuns()` from dispatch until its result entry is written, so a
+ * persisted `running` / `queued` status reaching `get()` without that entry (and without a running
+ * wrapper) was left by a process that stopped mid-run and will never be finished. Report it as
+ * `interrupted` so `get_subagent_result({ wait: true })` returns instead of polling forever, and
+ * `resume` can pick the session up again.
+ */
+function settleOrphanedRun(run: SubagentRunInfo): SubagentRunInfo {
+  return run.status === "running" || run.status === "queued" ? { ...run, status: "interrupted" } : run;
 }
 
 function parseSubagentModel(runtime: ModelRuntime, value: string | undefined) {
@@ -266,6 +312,10 @@ export function createSubagentController(
               }
             : {}),
           appendSystemPrompt,
+          // The exact prompt is sent through before_agent_start; see lib/exact-system-prompt.ts.
+          ...(promptPlan.exactSystemPrompt !== undefined
+            ? { extensionFactories: [createExactSystemPromptExtension(() => promptPlan.exactSystemPrompt)] }
+            : {}),
         },
         ...((profile.loadExtensions || profile.loadSkills)
           ? { resourceLoaderReloadOptions: projectTrustReloadOptions(childCwd, agentDir) }
@@ -274,7 +324,11 @@ export function createSubagentController(
 
       const extensionToolNames = profile.loadExtensions
         ? profile.extensionTools?.length
-          ? selectSubagentExtensionTools(services.resourceLoader.getExtensions().extensions, profile.extensionTools)
+          ? selectSubagentExtensionTools(
+            services.resourceLoader.getExtensions().extensions,
+            profile.extensionTools,
+            profile.disallowedExtensionTools,
+          )
           : services.resourceLoader.getExtensions().extensions.flatMap((extension) => [...extension.tools.keys()])
         : [];
       const activeTools = resolveShellTools(
@@ -398,18 +452,7 @@ export function createSubagentController(
         dependencies.invalidateSessionList();
         let result: SubagentRunInfo;
         try {
-          await inner.prompt(delegatedTask, {
-            source: "rpc",
-            ...(chatOnly
-              ? {
-                  preflightResult: (success: boolean) => {
-                    if (success && inner.agent.state) {
-                      inner.agent.state.systemPrompt = profile.systemPrompt;
-                    }
-                  },
-                }
-              : {}),
-          });
+          await inner.prompt(delegatedTask, { source: "rpc" });
           const text = inner.getLastAssistantText()?.trim();
           const aborted = stored.abortRequested && !maxTurnsReached;
           const providerError = aborted ? undefined : lastAssistantError(sessionManager);
@@ -541,6 +584,7 @@ export function createSubagentController(
       completedAt: undefined,
       result: undefined,
       error: undefined,
+      resumed: true,
     };
     const manager = wrapper.inner.sessionManager;
     let resolveCompletion!: (run: SubagentRunInfo) => void;
@@ -639,12 +683,13 @@ export function createSubagentController(
         wrapper.sessionFile,
       );
       if (run && wrapper.isRunning()) return { ...run, status: "running" };
-      if (run) return run;
+      if (run) return settleOrphanedRun(run);
     }
     const sessionPath = await dependencies.resolveSessionPath(sessionId);
     if (!sessionPath) return null;
     const manager = SessionManager.open(sessionPath);
-    return readSubagentRun(manager.getEntries() as unknown as SessionEntry[], sessionId, sessionPath);
+    const run = readSubagentRun(manager.getEntries() as unknown as SessionEntry[], sessionId, sessionPath);
+    return run && settleOrphanedRun(run);
   }
 
   async function steer(sessionId: string, message: string): Promise<void> {
@@ -688,31 +733,48 @@ export function createSubagentController(
   }
 
   async function deliverParentNotification(run: SubagentRunInfo, retries = 0): Promise<void> {
+    if (takeResultConsumed(run)) return;
     const deleted = () => isSessionDeletionBlocked(run.sessionId) || globalThis.__piSessionDeleted?.has(run.parentSessionId);
+    const pause = () => new Promise<void>((resolve) => { setTimeout(resolve, PARENT_IDLE_POLL_MS); });
+    // A surviving fork waits for reparenting, but a deleted child must release its
+    // finalizer even while the parent's deletion fence is still held.
+    const waitForParentDeletion = async () => {
+      while (globalThis.__piSessionDeletionBlocked?.has(run.parentSessionId) && !deleted()) await pause();
+    };
     if (deleted()) return;
-    await waitForSessionDeletion(run.parentSessionId);
-    if (deleted()) return;
+    await waitForParentDeletion();
+    if (deleted() || takeResultConsumed(run)) return;
+
     let parent = dependencies.getSession(run.parentSessionId);
     if (!parent?.isAlive()) {
       const sessionFile = await dependencies.resolveSessionPath(run.parentSessionId);
-      await waitForSessionDeletion(run.parentSessionId);
-      if (deleted()) return;
+      await waitForParentDeletion();
+      if (deleted() || takeResultConsumed(run)) return;
       if (!sessionFile) throw new Error(`Parent session not found: ${run.parentSessionId}`);
       parent = await dependencies.reopenSession(run.parentSessionId, sessionFile);
     }
     await parent.waitUntilReady();
+    // Hold follow-ups while the parent may still collect this result. Fenced
+    // children must release finalizers even if shutdown keeps the parent busy.
+    while (parent.isAlive() && parent.isRunning?.()) {
+      if (deleted() || takeResultConsumed(run)) return;
+      if (globalThis.__piSessionDeletionBlocked?.has(run.parentSessionId)) break;
+      await pause();
+    }
+    if (takeResultConsumed(run)) return;
     if (globalThis.__piSessionDeletionBlocked?.has(run.parentSessionId)) {
-      await waitForSessionDeletion(run.parentSessionId);
+      await waitForParentDeletion();
       if (!deleted() && retries < 3) return deliverParentNotification(run, retries + 1);
     }
-    if (deleted()) return;
+    if (deleted() || takeResultConsumed(run)) return;
     if (!parent.isAlive()) {
       if (retries < 3) return deliverParentNotification(run, retries + 1);
       throw new Error(`Parent session is no longer available: ${run.parentSessionId}`);
     }
+
     await parent.inner.sendCustomMessage({
       customType: "pi-web:subagent-notification",
-      content: subagentFinalText(run),
+      content: subagentNotificationText(run),
       display: true,
       details: subagentToolDetails(run),
     }, { deliverAs: "followUp", triggerTurn: true });
@@ -732,7 +794,7 @@ export function createSubagentController(
   }
 
   return {
-    extensionRuntime: { start, resume, get, steer, notifyParent },
+    extensionRuntime: { start, resume, get, steer, notifyParent, markResultConsumed },
     get,
     steer,
     abort,

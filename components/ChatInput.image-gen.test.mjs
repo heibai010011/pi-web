@@ -32,7 +32,7 @@ test("compact non-image composers never overwrite global image preferences", () 
 test("image mode Enter never steers the text agent", () => {
   const calls = [];
   const context = {
-    imageMode: true, isMobile: false, isStreaming: true, onSteer() {}, onFollowUp() {},
+    imageMode: true, isMobile: false, enterSendMode: "enter", isStreaming: true, onSteer() {}, onFollowUp() {},
     lastCompositionEndAtRef: { current: 0 }, isComposingRef: { current: false }, COMPOSITION_END_ENTER_GRACE_MS: 100,
     historyMenuOpen: false, slashMenuOpen: false, atMenuOpen: false,
     sendQueued: () => calls.push("queued"), handleSend: () => calls.push("send"),

@@ -20,6 +20,9 @@ for (const outcome of ["success", "missing", "failure"]) {
     const context = {
       URLSearchParams, console,
       sessionIdRef: { current: "session" }, reloadSeqRef: { current: 0 },
+      sessionHookMountedRef: { current: true }, promptRunIdRef: { current: 0 },
+      agentRunningRef: { current: false }, branchNavigationRef: { current: null },
+      branchNavigationFailedRef: { current: false }, loadFlightsRef: { current: new Map() },
       fetch: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
       setLoading: value => loading.push(value),
       setError: value => errors.push(value),

@@ -93,7 +93,7 @@ function startupSetup({ existing = false } = {}) {
     scheduleEventStreamClose: sid => scheduled.push(sid), setIsGeneratingImage: value => { ui.busy = value; },
   });
   for (const [name, current] of Object.entries({
-    sessionHookMountedRef: true, imageSubmissionIdRef: 0,
+    sessionHookMountedRef: true, imageSubmissionIdRef: 0, sessionToolsPinnedRef: false,
     branchNavigationRef: null, branchNavigationFailedRef: false,
     agentRunningRef: false, bashRunningRef: false, imageGeneratingRef: false, imageRequestPendingRef: false,
     imageRunIdRef: 0, imageModelRef: { provider: "fixture", modelId: "image" },

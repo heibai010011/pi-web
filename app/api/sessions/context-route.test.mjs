@@ -52,7 +52,7 @@ for (const live of [true, false]) test(`context route uses actual active leaf, i
     URL, Number, Boolean, String, buildSessionContext,
     NextResponse: { json: body => body },
     getRpcSession: () => live ? { isAlive: () => true, inner: { sessionManager: sm } } : null,
-    resolveSessionPath: async () => "fixture", SessionManager: { open: () => sm },
+    resolveSessionPath: async () => "fixture", openSessionManager: () => sm,
   });
   const handler = new Script(ts.transpileModule(fn.getText(ast).replace("export ", "") + "\nGET;", {
     compilerOptions: { target: ts.ScriptTarget.ESNext },

@@ -1,6 +1,6 @@
 // Image generation core for pi-web.
 //
-// pi-ai ships a complete image-generation layer (`createImagesModels()` +
+// pi-ai ships a complete image-generation layer (`createModels()` +
 // `generateImages()`), but pi's AgentSession never wires it up. This module is
 // the single server-side entry point both consumers share:
 //   - the built-in `generate_image` tool (lib/image-gen-extension.ts)
@@ -11,16 +11,16 @@
 // pi-ai's `onPayload` hook so the SDK request path stays untouched.
 
 import {
-  createImagesModels,
+  createModels,
   type AssistantImages,
-  type ImagesApi,
+  type ImageApi,
   type ImagesContext,
-  type ImagesModel,
-  type ImagesModels,
+  type ImageModel,
+  type Models,
   type ImagesOptions,
   type Usage,
 } from "@earendil-works/pi-ai";
-import { openrouterImagesProvider } from "@earendil-works/pi-ai/providers/openrouter-images";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import {
   isImageAspectRatio as isValidAspectRatio,
   MAX_IMAGE_GENERATION_COUNT,
@@ -76,6 +76,14 @@ export interface ImageGenerationOutcome {
   durationMs: number;
 }
 
+// pi-ai 0.99 unified image and chat registries. Keep an image-only view so
+// callers cannot accidentally offer a chat/classifier model for generation.
+export interface ImagesModels {
+  getModels(): readonly ImageModel<ImageApi>[];
+  getModel(provider: string, modelId: string): ImageModel<ImageApi> | undefined;
+  generateImages: Models["generateImages"];
+}
+
 declare global {
   var __piImagesModels: WeakMap<object, ImagesModels> | undefined;
 }
@@ -95,20 +103,19 @@ export function getImagesModels(credentials: ImageCredentialsLike): ImagesModels
   const existing = registry.get(credentials);
   if (existing) return existing;
 
-  const imagesModels = createImagesModels({ credentials: credentials as never });
-  for (const provider of defaultImageProviders()) {
-    imagesModels.setProvider(provider);
-  }
+  const models = createModels({ credentials: credentials as never });
+  models.setProvider(openrouterProvider());
+  const imagesModels: ImagesModels = {
+    getModels: () => models.getModelsOfType("image"),
+    getModel: (provider, modelId) => models.getModelOfType("image", provider, modelId),
+    generateImages: (model, context, options) => models.generateImages(model, context, options),
+  };
   registry.set(credentials, imagesModels);
   return imagesModels;
 }
 
-function defaultImageProviders() {
-  return [openrouterImagesProvider()];
-}
-
 /** Resolve an image model by provider/id, refreshing nothing — static catalog only. */
-export function findImageModel(imagesModels: ImagesModels, provider: string, modelId: string): ImagesModel<ImagesApi> | undefined {
+export function findImageModel(imagesModels: ImagesModels, provider: string, modelId: string): ImageModel<ImageApi> | undefined {
   return imagesModels.getModel(provider, modelId);
 }
 

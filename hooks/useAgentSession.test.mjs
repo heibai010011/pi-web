@@ -3,10 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
 
-const source = await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8");
-const chatWindowSource = await readFile(new URL("../components/ChatWindow.tsx", import.meta.url), "utf8");
-const chatInputSource = await readFile(new URL("../components/ChatInput.tsx", import.meta.url), "utf8");
-const appShellSource = await readFile(new URL("../components/AppShell.tsx", import.meta.url), "utf8");
+const jitiSource = async (url) => (await readFile(url, "utf8")).replace(/\r\n/g, "\n");
+const source = await jitiSource(new URL("./useAgentSession.ts", import.meta.url));
+const chatWindowSource = await jitiSource(new URL("../components/ChatWindow.tsx", import.meta.url));
+const phaseLabelSource = await jitiSource(new URL("../lib/chat-phase-label.ts", import.meta.url));
+const chatInputSource = await jitiSource(new URL("../components/ChatInput.tsx", import.meta.url));
+const appShellSource = await jitiSource(new URL("../components/AppShell.tsx", import.meta.url));
 
 // Execute the actual narrowly scoped callback with fake refs/timers, not a
 // duplicate algorithm (the rest of this file also checks hook wiring).
@@ -31,12 +33,91 @@ function idleHistoryHarness() {
   return { refs, timers, loads, request };
 }
 
+function sessionLoadHarness() {
+  const ast = ts.createSourceFile("hook.ts", source, ts.ScriptTarget.Latest, true);
+  let loader;
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(ast) === "loadSession") loader = node;
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  const requests = [], errors = [], loading = [], deleted = [];
+  const refs = {
+    sessionIdRef: { current: "session" }, reloadSeqRef: { current: 0 },
+    promptRunIdRef: { current: 1 }, sessionHookMountedRef: { current: true },
+    agentRunningRef: { current: false }, branchNavigationRef: { current: null },
+    branchNavigationFailedRef: { current: false }, loadFlightsRef: { current: new Map() },
+    entryIdsRef: { current: [] }, historyCursorRef: { current: null }, hasEarlierMessagesRef: { current: false },
+  };
+  const dependencies = {
+    ...refs, URLSearchParams, console,
+    fetch: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
+    setLoading: value => loading.push(value), setError: value => errors.push(value),
+    deleteSessionViewSnapshot: sid => deleted.push(sid),
+  };
+  for (const name of ["Data", "ActiveLeafId", "Messages", "EntryIds", "HistoryCursor", "HasEarlierMessages"]) dependencies[`set${name}`] = () => {};
+  const js = ts.transpile(`(${loader.initializer.arguments[0].getText(ast)})`, { target: ts.ScriptTarget.ES2022 });
+  const load = new Function(...Object.keys(dependencies), `return ${js}`)(...Object.values(dependencies));
+  return { refs, requests, errors, loading, deleted, load };
+}
+
+test("singleflight shares equivalent idle reads but never run or branch epochs", async () => {
+  const h = sessionLoadHarness();
+  const first = h.load("session");
+  const shared = h.load("session");
+  assert.equal(h.requests.length, 1);
+  h.refs.promptRunIdRef.current++;
+  const nextRun = h.load("session");
+  assert.equal(h.requests.length, 2);
+  h.refs.reloadSeqRef.current++;
+  const nextBranch = h.load("session");
+  assert.equal(h.requests.length, 3);
+  h.requests[0].reject(new Error("old run"));
+  h.requests[1].reject(new Error("old branch"));
+  h.requests[2].resolve({ status: 404 });
+  await Promise.all([first, shared, nextRun, nextBranch]);
+  assert.deepEqual(h.errors, [null]);
+  assert.deepEqual(h.deleted, ["session"]);
+});
+
+test("idle persistence notifications bypass an older pending idle snapshot", async () => {
+  const h = sessionLoadHarness();
+  const older = h.load("session");
+  const idle = idleHistoryHarness();
+  idle.request();
+  idle.timers.shift()();
+  const [, showLoading, includeState, options] = idle.loads[0];
+  options.runId = h.refs.promptRunIdRef.current;
+  const fresh = h.load("session", showLoading, includeState, options);
+  assert.equal(h.requests.length, 2, "notification must issue a post-persistence GET");
+  h.requests[0].reject(new Error("pre-notification snapshot"));
+  await older;
+  assert.deepEqual(h.errors, []);
+  h.requests[1].resolve({ status: 404 });
+  await fresh;
+  assert.deepEqual(h.deleted, ["session"]);
+});
+
+test("forced and loading reads retain latest-wins loading ownership", async () => {
+  const h = sessionLoadHarness();
+  const stale = h.load("session", true, false, { force: true });
+  const current = h.load("session", true, false, { force: true });
+  h.requests[0].reject(new Error("obsolete"));
+  await stale;
+  assert.deepEqual(h.loading, [true, true]);
+  assert.deepEqual(h.errors, []);
+  h.requests[1].reject(new Error("current"));
+  await current;
+  assert.deepEqual(h.loading, [true, true, false]);
+  assert.deepEqual(h.errors, ["Error: current"]);
+});
+
 test("idle history coalesces custom/reconnect bursts without appending or starting runs", () => {
   const h = idleHistoryHarness();
   h.request(); h.request(); h.request();
   assert.equal(h.timers.length, 1);
   h.timers.shift()();
-  assert.deepEqual(h.loads, [["parent", false, false, { runId: 3 }]]);
+  assert.deepEqual(h.loads, [["parent", false, false, { runId: 3, fresh: true }]]);
   assert.equal(h.refs.agentRunningRef.current, false);
   h.request();
   assert.equal(h.timers.length, 1);
@@ -194,13 +275,36 @@ test("fresh sessions use the preference while persisted and live sessions restor
     /const existingSessionId = session\?\.id;[\s\S]*?useLayoutEffect\(\(\) => \{\s*if \(!existingSessionId && \(!isNew \|\| sessionIdRef\.current\)\) return;\s*setToolPresetState\(getPreferredToolPreset\(\)\)/,
   );
   assert.match(source, /if \(agentState\?\.running\) \{\s*loadTools\(session\.id\)/);
-  assert.match(source, /d\.toolNames !== undefined \? getPresetFromToolNames\(d\.toolNames\) : "default"/);
+  assert.match(source, /d\.toolNames !== undefined \? getPresetFromToolNames\(d\.toolNames\) : CONFIGURED_TOOL_PRESET/);
   assert.match(changeSource, /setPreferredToolPreset\(preset\)/);
-  assert.match(changeSource, /\(sid, \{ type: "set_tools", toolNames \}\)/);
+  assert.match(changeSource, /type: "set_tools",\s*\.\.\.\(toolNames !== undefined \? \{ toolNames \} : \{\}\),/);
   assert.match(changeSource, /activeSessionId !== sid \|\| result\?\.recreated/);
   assert.match(changeSource, /result\?\.recreated[\s\S]*?maintainEventsConnected\(activeSessionId\)/);
   assert.match(changeSource, /sessionIdRef\.current = activeSessionId/);
   assert.doesNotMatch(loadToolsSource, /setPreferredToolPreset/);
+});
+
+test("sessions the user never overrode follow pi's configured defaultTools (#700)", () => {
+  const ensureSource = source.slice(
+    source.indexOf("  const ensureNewSession = useCallback"),
+    source.indexOf("  const loadSystemInfo = useCallback"),
+  );
+  const loadToolsSource = source.slice(
+    source.indexOf("  const loadTools = useCallback"),
+    source.indexOf("  const promoteNewSession"),
+  );
+
+  // A new session must omit toolNames entirely rather than pin pi-web's own preset.
+  assert.match(ensureSource, /\.\.\.\(toolNames !== undefined \? \{ toolNames \} : \{\}\),/);
+  assert.doesNotMatch(ensureSource, /^ +toolNames,$/m);
+  assert.match(ensureSource, /sessionToolsPinnedRef\.current = toolNames !== undefined/);
+
+  // An unpinned session keeps saying "configured" instead of borrowing whichever
+  // preset its resolved tools happen to match.
+  assert.match(
+    loadToolsSource,
+    /setToolPresetState\(sessionToolsPinnedRef\.current \? getPresetFromTools\(tools\) : CONFIGURED_TOOL_PRESET\)/,
+  );
 });
 
 test("only the session-mount load probes disk for external appends", () => {
@@ -212,10 +316,10 @@ test("only the session-mount load probes disk for external appends", () => {
     source.indexOf("// Load session on mount"),
     source.indexOf("sessionHookMountedRef.current = false"),
   );
-  assert.match(loadSessionSource, /options\?: \{ force\?: boolean; runId\?: number \}/);
+  assert.match(loadSessionSource, /options\?: \{ force\?: boolean; runId\?: number; fresh\?: boolean \}/);
   assert.match(loadSessionSource, /if \(options\?\.force\) params\.set\("force", "1"\)/);
   assert.match(loadSessionSource, /d\.wrapperRebuilt[\s\S]*?eventConnectionRef\.current\?\.close\(\)[\s\S]*?maintain\(sid\)/);
-  assert.match(mountSource, /loadSession\(session\.id, true, true, \{ force: true \}\)/);
+  assert.match(mountSource, /loadSession\(session\.id, !cached, true, \{ force: true \}\)/);
   assert.match(source, /await loadSession\(sid\)/);
   assert.equal([...source.matchAll(/\{ force: true \}/g)].length, 1);
 });
@@ -233,6 +337,21 @@ test("first user messages expose both branch actions and edit before their own e
   assert.match(navigateSource, /await loadContext\(sid, null\)/);
   assert.match(navigateSource, /return await handleLeafChange\(entryId\)/);
   assert.match(navigateSource, /return isCurrentSelection\(\) && !branchNavigationFailedRef\.current/);
+});
+
+test("history edits move the branch only when sent, so cancel or reload keeps it", () => {
+  const sendSource = source.slice(
+    source.indexOf("  const handleSend = useCallback"),
+    source.indexOf("  const executeBash = useCallback"),
+  );
+
+  assert.doesNotMatch(chatWindowSource, /onNavigate=/);
+  assert.match(source, /if \(session\?\.id && opts\.chatInputRef\?\.current\?\.replaceMessage\(message\)\) setEdit\(entryId\)/);
+  assert.match(chatInputSource, /onClick=\{\(\) => \{ clearInput\(\); onCancelEdit\(\); \}\}/);
+  assert.match(source, /const cancelEdit = useCallback\(\(\) => setEdit\(null\)/);
+  assert.match(sendSource, /setEdit\(null\);\s*const navigated = await handleNavigateRef\.current\?\.\(entryId\)/);
+  assert.match(sendSource, /if \(!navigated\) \{\s*setEdit\(entryId\);\s*restoreSubmission\(/);
+  assert.match(sendSource, /builtinCommandLifetimeRef\.current !== lifetime \|\| sessionIdRef\.current !== sid/);
 });
 
 test("an empty persisted session displays the model it will use on first send", () => {
@@ -395,8 +514,11 @@ test("delegates event stream readiness and hides an empty agent phase", () => {
   // Matches upstream: the streaming bubble mounts only with content, and the
   // running phase renders as a pulsing muted label when nothing streams yet.
   assert.match(chatWindowSource, /streamState\.isStreaming && hasStreamingContent && streamState\.streamingMessage/);
-  assert.match(chatWindowSource, /agentRunning && !streamState\.streamingMessage\?\.content\.length && agentPhase && \(/);
-  assert.match(chatWindowSource, /return null;/);
+  assert.match(chatWindowSource, /agentRunning && !hasStreamingContent && \(agentPhase \|\| isCompacting\)/);
+  // Compaction is what the user needs to know while a turn is being compacted, so it is
+  // forwarded to the label instead of letting the stream phase read as a hang.
+  assert.match(chatWindowSource, /phaseLabel\(agentPhase, t, isCompacting\)/);
+  assert.match(phaseLabelSource, /return null;/);
 });
 
 test("uses one absolute agent-readiness deadline instead of a five-second transport deadline", () => {
@@ -440,6 +562,30 @@ test("keeps the selected session warm while idle and renews its lease", () => {
   assert.match(appShellSource, /onRunningSessionIdsChange=\{handleRunningSessionIdsChange\}/);
 });
 
+test("opens the selected session's event stream even when Strict Mode re-runs effects", () => {
+  // Strict Mode re-runs effects in declaration order after a simulated
+  // unmount. The mount-only effect's cleanup flips sessionHookMountedRef to
+  // false and only restores it when it re-runs, which happens after the
+  // warm-session effect. That effect must therefore re-assert the ref itself
+  // or shouldMaintain() refuses to open the stream on mount and on every
+  // switch back to a running session.
+  const warmSource = source.slice(
+    source.indexOf("  // Keep the selected session warm even while its agent is idle."),
+    source.indexOf("    const renewLease = async () => {"),
+  );
+  assert.match(warmSource, /sessionHookMountedRef\.current = true;\s*maintainEventsConnected\(sid\);/);
+  assert.ok(
+    warmSource.indexOf("sessionHookMountedRef.current = true;")
+      < warmSource.indexOf("maintainEventsConnected(sid);"),
+  );
+  const mountSource = source.slice(
+    source.indexOf("  useEffect(() => {\n    sessionHookMountedRef.current = true;"),
+    source.indexOf("  useEffect(() => {\n    onSystemPromptChange?.(systemPrompt);"),
+  );
+  assert.match(mountSource, /return \(\) => \{\s*sessionHookMountedRef\.current = false;/);
+  assert.match(mountSource, /closeEvents\(\);\s*\};\s*\/\/ eslint-disable-next-line react-hooks\/exhaustive-deps\s*\}, \[\]\);/);
+});
+
 test("keeps one reducer-owned assistant partial and consumes Pi JSON deltas", () => {
   const connectedSource = source.slice(
     source.indexOf('case "connected"'),
@@ -465,6 +611,9 @@ test("keeps one reducer-owned assistant partial and consumes Pi JSON deltas", ()
   assert.match(streamSource, /delta\.type !== "toolcall_start" && delta\.type !== "toolcall_delta"/);
   assert.doesNotMatch(streamSource, /case "message_delta"/);
   assert.match(messageEndSource, /const completed = event\.message as AgentMessage/);
+  // Transcript system messages (Pi >= 0.86 prompt and tool loadout) never enter the chat.
+  assert.match(streamSource, /if \(isSystemMessageEvent\(event\)\) break;/);
+  assert.match(messageEndSource, /if \(isSystemMessageEvent\(event\)\) break;/);
   assert.match(messageEndSource, /normalizeToolCalls\(completed\)/);
   assert.match(messageEndSource, /dispatch\(\{ type: "end" \}\)/);
   assert.doesNotMatch(messageEndSource, /streamState\.streamingMessage/);
@@ -510,8 +659,8 @@ test("shows the latest streamed tool execution progress in the running phase", (
 
   assert.match(updateSource, /getToolExecutionProgress\(event\.partialResult\)/);
   assert.match(updateSource, /tools: \[\.\.\.tools\.filter\([\s\S]*?, updated\]/);
-  assert.match(chatWindowSource, /if \(latest\?\.progress\)/);
-  assert.match(chatWindowSource, /chat\.runningNamedTool[\s\S]*latest\.progress/);
+  assert.match(phaseLabelSource, /if \(latest\?\.progress\)/);
+  assert.match(phaseLabelSource, /chat\.runningNamedTool[\s\S]*latest\.progress/);
 });
 
 test("reconnects active shell output to its streaming tool call", () => {
@@ -815,7 +964,7 @@ test("manual compaction reloads without unmounting the chat scroller", () => {
   // The loading spinner may only replace the chat area on first mount, where
   // there is no reading position to preserve.
   assert.doesNotMatch(source, /loadSession\(sid, true\b/);
-  assert.match(source, /loadSession\(session\.id, true, true, \{ force: true \}\)/);
+  assert.match(source, /loadSession\(session\.id, !cached, true, \{ force: true \}\)/);
 });
 
 test("auto-compact slash command toggles session auto-compaction", () => {
@@ -834,4 +983,21 @@ test("auto-compact slash command toggles session auto-compaction", () => {
   // State mirrors the wrapper so the toggle reflects server-side changes too.
   assert.match(source, /setAutoCompactionEnabled\(state\?\.autoCompactionEnabled \?\? true\)/);
   assert.match(source, /setAutoCompactionEnabled\(liveState\.autoCompactionEnabled \?\? true\)/);
+});
+
+test("keeps the compaction control reachable while a turn is auto-compacting", () => {
+  // Auto-compaction starts mid-turn, so `isStreaming` (sessionBusy) is already true. Hiding
+  // the control behind `!isStreaming` left only the generic stop button, which aborts the
+  // whole prompt instead of the compaction.
+  const controlBlock = chatInputSource.slice(
+    chatInputSource.indexOf("onClick={isCompacting ? onAbortCompaction : onCompact}") - 200,
+    chatInputSource.indexOf('aria-label={isCompacting ? t("chat.stopCompaction")'),
+  );
+
+  assert.match(controlBlock, /\{\(!isStreaming \|\| isCompacting\) && onCompact && \(/);
+  assert.doesNotMatch(controlBlock, /\{!isStreaming && onCompact && \(/);
+  // The "streaming but not compacting" state is now unreachable, so its disabled styling
+  // must be gone rather than left as dead branches.
+  assert.doesNotMatch(controlBlock, /isStreaming && !isCompacting/);
+  assert.match(controlBlock, /cursor: "pointer"/);
 });
