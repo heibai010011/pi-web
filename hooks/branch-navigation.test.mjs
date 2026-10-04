@@ -24,7 +24,7 @@ function setup() {
   const commands = [], reads = [], notices = [], restored = [];
   const ui = { branchNavigationBlocked: false };
   const context = createContext({
-    console: { error() {} }, URLSearchParams,
+    console: { error() {} }, URLSearchParams, isCompacting: false,
     sendAgentCommand: async (sid, cmd) => {
       const d = deferred(); commands.push({ sid, ...cmd, ...d });
       const result = await d.promise;
@@ -53,6 +53,17 @@ function setup() {
 }
 // Flush the bounded promise continuations in the callbacks; no timers or live I/O.
 async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
+
+test("compaction blocks branch mutation and leaves the current view intact", async () => {
+  const s = setup();
+  s.context.isCompacting = true;
+  assert.equal(await s.select("A"), false);
+  assert.equal(await s.navigate("B"), false);
+  assert.equal(s.commands.length, 0);
+  assert.equal(s.reads.length, 0);
+  assert.equal(s.ui.leaf, undefined);
+  assert.equal(s.ui.branchNavigationBlocked, false);
+});
 
 test("B POST and context finish while obsolete A context remains pending", async () => {
   const s = setup();
