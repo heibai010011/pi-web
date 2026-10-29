@@ -16,7 +16,13 @@ import {
 } from "react";
 import type { SessionFamily } from "@/lib/session-family";
 import { splitForkSuffix } from "@/lib/session-fork-name";
-import { MAX_PROJECT_NAME_LENGTH, type ProjectMovePosition } from "@/lib/session-ui-state-shared";
+import {
+  MAX_FOLDER_NAME_LENGTH,
+  MAX_FOLDER_PATTERN_LENGTH,
+  MAX_PROJECT_NAME_LENGTH,
+  type ProjectMovePosition,
+  type SessionUiFolder,
+} from "@/lib/session-ui-state-shared";
 import {
   PINNED_MORE_KEY,
   getRowOffsets,
@@ -134,6 +140,22 @@ export interface SessionTreeProps {
   onArchiveGroupMenu?(project: SidebarProject, opener: HTMLElement): void;
   onOpenOtherProject(opener: HTMLElement): void;
   onOpenArchive(): void;
+  /** A folder row's chevron/name: fold it in or out. */
+  onToggleFolder?(folderId: string): void;
+  /** A folder row's ⋯: its menu (new subfolder, rename, rule, move, delete). */
+  onFolderMenu?(folder: SessionUiFolder, opener: HTMLElement): void;
+  /** The folder whose row is a name field (its menu's Rename…). */
+  renamingFolderId?: string | null;
+  onFolderRenameCommit?(folder: SessionUiFolder, value: string): void;
+  onFolderRenameCancel?(): void;
+  /** The folder whose row edits its auto-classify rule. */
+  ruleFolderId?: string | null;
+  onFolderRuleCommit?(folder: SessionUiFolder, value: string): void;
+  onFolderRuleCancel?(): void;
+  /** The folder whose row asks to be deleted. */
+  deletingFolderId?: string | null;
+  onFolderDeleteConfirm?(folder: SessionUiFolder): void;
+  onFolderDeleteCancel?(): void;
   /** Scroll a row into view (and maybe focus it); see SessionTreeReveal. */
   reveal?: SessionTreeReveal | null;
   /** The reveal request with this id was scrolled to or dropped: the parent lets go of it. */
@@ -179,6 +201,9 @@ export function SessionTree(props: SessionTreeProps): ReactNode {
     confirmDeleteRootId,
     activeMenuRowKey,
     reveal,
+    renamingFolderId,
+    ruleFolderId,
+    deletingFolderId,
   } = props;
   const { t } = useI18n();
   // Rows read the handlers at event time, so memoized rows need not re-render
@@ -293,9 +318,10 @@ export function SessionTree(props: SessionTreeProps): ReactNode {
       if (row.key === focusedRowKey || row.key === activeMenuRowKey || row.key === pendingRevealKey || row.key === draggedRowKey) indices.push(index);
       else if (row.kind === "session" && (row.family.root.id === renamingRootId || row.family.root.id === confirmDeleteRootId)) indices.push(index);
       else if (row.kind === "group" && row.project.key === renamingProjectKey) indices.push(index);
+      else if (row.kind === "folder" && (row.folder.id === renamingFolderId || row.folder.id === ruleFolderId || row.folder.id === deletingFolderId)) indices.push(index);
     });
     return indices;
-  }, [rows, focusedRowKey, activeMenuRowKey, pendingRevealKey, draggedRowKey, renamingRootId, renamingProjectKey, confirmDeleteRootId]);
+  }, [rows, focusedRowKey, activeMenuRowKey, pendingRevealKey, draggedRowKey, renamingRootId, renamingProjectKey, confirmDeleteRootId, renamingFolderId, ruleFolderId, deletingFolderId]);
   const visibleIndices = useMemo(
     () => (loading ? [] : getVisibleRowIndices(offsets, scrollTop, viewportHeight, OVERSCAN_PX, keepMounted)),
     [loading, offsets, scrollTop, viewportHeight, keepMounted],
@@ -445,6 +471,21 @@ export function SessionTree(props: SessionTreeProps): ReactNode {
               if (row.kind === "archive-group") {
                 return <ArchiveGroupRowView key={row.key} row={row} top={top} height={height} menuOpen={menuOpen} handlers={handlersRef} />;
               }
+              if (row.kind === "folder") {
+                return (
+                  <FolderRowView
+                    key={row.key}
+                    row={row}
+                    top={top}
+                    height={height}
+                    menuOpen={menuOpen}
+                    renaming={row.folder.id === renamingFolderId}
+                    editingRule={row.folder.id === ruleFolderId}
+                    confirming={row.folder.id === deletingFolderId}
+                    handlers={handlersRef}
+                  />
+                );
+              }
               if (row.kind === "group") {
                 const renaming = row.project.key === renamingProjectKey;
                 return (
@@ -526,13 +567,18 @@ const SessionRowView = memo(function SessionRowView({
     confirming ? "is-confirming" : "",
     renaming ? "is-renaming" : "",
   ].filter(Boolean).join(" ");
+  // A row filed under a folder steps in with it; a folder's own title sits
+  // one 14px parent step further in.
+  const rowStyleForRow = row.depth
+    ? { ...rowStyle(top, height), paddingLeft: `calc(20px + ${row.depth * 14}px)` }
+    : rowStyle(top, height);
 
   if (confirming) {
     const shortTitle = title.slice(0, DELETE_TITLE_MAX) + (title.length > DELETE_TITLE_MAX ? "…" : "");
     return (
       <div
         className={className}
-        style={rowStyle(top, height)}
+        style={rowStyleForRow}
         data-row-key={row.key}
         onKeyDown={(event) => {
           if (event.key !== "Escape" || isImeKey(event)) return;
@@ -560,7 +606,7 @@ const SessionRowView = memo(function SessionRowView({
 
   if (renaming) {
     return (
-      <div className={className} style={rowStyle(top, height)} data-row-key={row.key}>
+      <div className={className} style={rowStyleForRow} data-row-key={row.key}>
         <RenameInput
           initialValue={title}
           label={t("sidebar.rename")}
@@ -635,7 +681,7 @@ const SessionRowView = memo(function SessionRowView({
   return (
     <div
       className={className}
-      style={rowStyle(top, height)}
+      style={rowStyleForRow}
       data-row-key={row.key}
       onClick={() => handlers.current.onSelectFamily(family)}
       onContextMenu={(event) => handlers.current.onRowContextMenu(row, event)}
@@ -719,12 +765,14 @@ const SessionRowView = memo(function SessionRowView({
 function RenameInput({
   initialValue,
   label,
+  placeholder,
   maxLength,
   onCommit,
   onCancel,
 }: {
   initialValue: string;
   label: string;
+  placeholder?: string;
   maxLength?: number;
   onCommit: (value: string) => void;
   onCancel: () => void;
@@ -754,6 +802,7 @@ function RenameInput({
       className="session-tree-rename"
       value={value}
       aria-label={label}
+      placeholder={placeholder}
       maxLength={maxLength}
       onChange={(event) => setValue(event.target.value)}
       onBlur={(event) => commit(event.currentTarget.value)}
@@ -963,6 +1012,141 @@ const GroupRowView = memo(function GroupRowView({
   );
 });
 
+/**
+ * A user folder inside an expanded project group: chevron, name, auto-rule
+ * hint, session count (subfolders included) and its ⋯ menu. Rename and the
+ * rule edit in place, like a session's title and a project's name; Delete asks
+ * first. Its sessions are ordinary session rows, indented one step per folder.
+ */
+const FolderRowView = memo(function FolderRowView({
+  row,
+  top,
+  height,
+  menuOpen,
+  renaming,
+  editingRule,
+  confirming,
+  handlers,
+}: {
+  row: Extract<SidebarRow, { kind: "folder" }>;
+  top: number;
+  height: number;
+  menuOpen: boolean;
+  renaming: boolean;
+  editingRule: boolean;
+  confirming: boolean;
+  handlers: Handlers;
+}) {
+  const { t } = useI18n();
+  const { folder, depth, collapsed } = row;
+  const className = [
+    "session-tree-row session-tree-folder",
+    menuOpen ? "is-active" : "",
+    collapsed ? "is-collapsed" : "",
+  ].filter(Boolean).join(" ");
+  // Folder titles start one step in from the project's session titles; every
+  // nesting level adds the 14px a row filed in the folder steps in.
+  const style = { ...rowStyle(top, height), paddingLeft: `calc(20px + ${depth * 14}px)` };
+  const shortName = folder.name.slice(0, DELETE_TITLE_MAX) + (folder.name.length > DELETE_TITLE_MAX ? "…" : "");
+
+  if (renaming) {
+    return (
+      <div className={className} style={style} data-row-key={row.key}>
+        <RenameInput
+          initialValue={folder.name}
+          label={t("sidebar.folderName")}
+          maxLength={MAX_FOLDER_NAME_LENGTH}
+          onCommit={(value) => handlers.current.onFolderRenameCommit?.(folder, value)}
+          onCancel={() => handlers.current.onFolderRenameCancel?.()}
+        />
+      </div>
+    );
+  }
+
+  if (editingRule) {
+    return (
+      <div className={className} style={style} data-row-key={row.key}>
+        <RenameInput
+          initialValue={folder.autoPattern ?? ""}
+          label={t("sidebar.folderRule")}
+          placeholder={t("sidebar.folderRulePlaceholder")}
+          maxLength={MAX_FOLDER_PATTERN_LENGTH}
+          onCommit={(value) => handlers.current.onFolderRuleCommit?.(folder, value)}
+          onCancel={() => handlers.current.onFolderRuleCancel?.()}
+        />
+      </div>
+    );
+  }
+
+  if (confirming) {
+    return (
+      <div
+        className={`${className} is-confirming`}
+        style={style}
+        data-row-key={row.key}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape" || isImeKey(event)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          handlers.current.onFolderDeleteCancel?.();
+        }}
+      >
+        <DeleteConfirm
+          label={t("sidebar.deleteFolderConfirm", { name: shortName })}
+          deleteLabel={t("sidebar.delete")}
+          cancelLabel={t("sidebar.cancel")}
+          onConfirm={(event) => {
+            event.stopPropagation();
+            handlers.current.onFolderDeleteConfirm?.(folder);
+          }}
+          onCancel={(event) => {
+            event.stopPropagation();
+            handlers.current.onFolderDeleteCancel?.();
+          }}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className={className} style={style} data-row-key={row.key}>
+      <button
+        type="button"
+        className="session-tree-folder-toggle"
+        aria-expanded={!collapsed}
+        title={folder.name}
+        onClick={() => handlers.current.onToggleFolder?.(folder.id)}
+      >
+        <ChevronIcon size={11} strokeWidth={3} className={`session-tree-chevron${collapsed ? "" : " is-open"}`} />
+        <span className="session-tree-folder-name">{folder.name}</span>
+        {folder.autoPattern && (
+          <span className="session-tree-folder-rule" title={`${t("sidebar.folderRule")}: ${folder.autoPattern}`}>
+            {folder.autoPattern}
+          </span>
+        )}
+        <span className="session-tree-folder-count">{row.count}</span>
+        {collapsed && <ActivitySummary running={row.running} unread={row.unread} t={t} />}
+      </button>
+      <span className="session-tree-folder-actions">
+        <button
+          type="button"
+          className={`session-tree-folder-action${menuOpen ? " is-active" : ""}`}
+          aria-label={t("sidebar.folderActions", { name: folder.name })}
+          title={t("sidebar.folderActions", { name: folder.name })}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={(event) => {
+            event.stopPropagation();
+            handlers.current.onFolderMenu?.(folder, event.currentTarget);
+          }}
+        >
+          <MoreIcon size={13} />
+        </button>
+      </span>
+    </div>
+  );
+});
+
 /** The rows with at most one control: section headers, "show more", footer links. */
 const PlainRowView = memo(function PlainRowView({
   row,
@@ -971,7 +1155,7 @@ const PlainRowView = memo(function PlainRowView({
   handlers,
   onMoreAction,
 }: {
-  row: Exclude<SidebarRow, { kind: "session" | "group" | "archive-group" | "spacer" }>;
+  row: Exclude<SidebarRow, { kind: "session" | "group" | "archive-group" | "spacer" | "folder" }>;
   top: number;
   height: number;
   handlers: Handlers;

@@ -539,9 +539,9 @@ test("headers lead with their chevron, and every row's text starts in one column
   // One rhythm: session rows, every header (a project's, the pinned
   // section's, the archive's projects), the empty note and the footer are
   // one height, 28px (44px on a phone); only "show more" is shorter.
-  assert.deepEqual(SIDEBAR_ROW_HEIGHTS.desktop, { "pinned-header": 28, session: 28, "pinned-more": 26, group: 28, "group-more": 26, "group-empty": 28, spacer: 8, "footer-open": 28, "footer-archived": 28, "archive-group": 28 });
+  assert.deepEqual(SIDEBAR_ROW_HEIGHTS.desktop, { "pinned-header": 28, session: 28, "pinned-more": 26, group: 28, "group-more": 26, "group-empty": 28, folder: 28, spacer: 8, "footer-open": 28, "footer-archived": 28, "archive-group": 28 });
   for (const [layout, height] of [["desktop", 28], ["mobile", 44]]) {
-    for (const kind of ["session", "group", "pinned-header", "group-empty", "footer-open", "footer-archived", "archive-group"]) {
+    for (const kind of ["session", "group", "pinned-header", "group-empty", "folder", "footer-open", "footer-archived", "archive-group"]) {
       assert.equal(SIDEBAR_ROW_HEIGHTS[layout][kind], height, `${layout} ${kind}`);
     }
   }
@@ -573,4 +573,49 @@ test("the drag ghost is shorter than a header", () => {
   // its height to keep it clear of the pointer and the line).
   assert.match(cssRule(".session-tree-drag-ghost"), /\n\s*height: 22px;/);
   assert.ok(22 < SIDEBAR_ROW_HEIGHTS.desktop.group, "shorter than a header");
+});
+
+function folderRow(extra = {}) {
+  const { folder: folderExtra = {}, ...rest } = extra;
+  const folder = { id: "folder-1", name: "Bugs", projectKey: project.key, ...folderExtra };
+  return { kind: "folder", key: `folder:${folder.id}`, folder, depth: 0, collapsed: false, count: 0, running: 0, unread: 0, ...rest };
+}
+
+test("a folder row leads with its chevron, counts its sessions and offers ⋯", () => {
+  const html = render({
+    rows: [groupRow(), folderRow({ depth: 1, count: 2 })],
+    onToggleFolder: noop,
+    onFolderMenu: noop,
+  });
+  const row = rowMarkup(html, "folder:folder-1");
+  // A header's height and one 14px step in per folder level.
+  assert.match(row, /^<div class="session-tree-row session-tree-folder" style="top:28px;height:28px;padding-left:calc\(20px \+ 14px\)" data-row-key="folder:folder-1">/);
+  assert.match(row, /<button type="button" class="session-tree-folder-toggle" aria-expanded="true" title="Bugs">/);
+  assert.match(row, /session-tree-chevron is-open/);
+  assert.match(row, /<span class="session-tree-folder-name">Bugs<\/span>/);
+  assert.match(row, /<span class="session-tree-folder-count">2<\/span>/);
+  assert.match(row, /class="session-tree-folder-action" aria-label="Bugs folder actions"/);
+  // Folded: the chevron says so and its activity summary shows instead of rows.
+  const folded = render({ rows: [folderRow({ collapsed: true, count: 0, running: 2, unread: 1 })], onToggleFolder: noop });
+  assert.match(rowMarkup(folded, "folder:folder-1"), /aria-expanded="false"/);
+  assert.doesNotMatch(rowMarkup(folded, "folder:folder-1"), /session-tree-chevron is-open/);
+  assert.match(rowMarkup(folded, "folder:folder-1"), /session-tree-summary/);
+});
+
+test("a folder row edits its name and rule in place, and asks before deleting", () => {
+  const renaming = rowMarkup(render({ rows: [folderRow()], renamingFolderId: "folder-1" }), "folder:folder-1");
+  assert.match(renaming, /<input class="session-tree-rename"[^>]*aria-label="Folder name"[^>]*value="Bugs"/);
+
+  const rule = rowMarkup(render({ rows: [folderRow({ folder: { autoPattern: "work/app" } })], ruleFolderId: "folder-1" }), "folder:folder-1");
+  assert.match(rule, /<input class="session-tree-rename"[^>]*aria-label="Auto-classify rule…"[^>]*placeholder="[^"]+"/);
+  assert.match(rule, /value="work\/app"/);
+
+  const deleting = rowMarkup(render({ rows: [folderRow()], deletingFolderId: "folder-1" }), "folder:folder-1");
+  assert.match(deleting, /Delete folder Bugs\? Its sessions are kept\./);
+  assert.match(deleting, /class="session-tree-confirm-delete"/);
+});
+
+test("a session filed under a folder steps in by folder depth", () => {
+  const html = render({ rows: [groupRow(), sessionRow(session("a"), {})].map((row, index) => index === 1 ? { ...row, depth: 2 } : row) });
+  assert.match(rowMarkup(html, "session:group:a"), /style="top:28px;height:28px;padding-left:calc\(20px \+ 28px\)"/);
 });

@@ -21,6 +21,7 @@ export type SessionMenuActionId =
   | "unpin"
   | "rename"
   | "fork"
+  | "move-to-folder"
   | "mark-read"
   | "mark-unread"
   | "archive"
@@ -58,6 +59,9 @@ export function sessionMenuEntries(
     { kind: "action", id: context === "pinned" ? "unpin" : "pin", shortcut: "P" },
     { kind: "action", id: "rename", shortcut: "R" },
     { kind: "action", id: "fork", shortcut: "F" },
+    // Filing a session under a folder: not offered in the archive view, whose
+    // rows have no folder section to land in.
+    { kind: "action", id: "move-to-folder", shortcut: "M" },
     { kind: "action", id: status.unread ? "mark-read" : "mark-unread", shortcut: "U" },
     // A running family would come straight back: archiving waits for the run.
     status.running

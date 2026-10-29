@@ -23,7 +23,7 @@ import {
 
 const MAX_BYTES = 4 * 1024 * 1024;
 // `__proto__` is never copied: assigning it would set the object's prototype instead.
-const KNOWN_KEYS = new Set(["version", "revision", "sessions", "projects", "projectOrder", "projectNames", "__proto__"]);
+const KNOWN_KEYS = new Set(["version", "revision", "sessions", "projects", "projectOrder", "projectNames", "folders", "folderAssignments", "__proto__"]);
 
 // Route handlers are bundled separately and hot reload re-evaluates modules; globalThis keeps one queue per process.
 const QUEUE_KEY: symbol = Symbol.for("pi-web:session-ui-state-write-queue");
@@ -226,6 +226,10 @@ function editState(
         projects: next.projects,
         ...(next.projectOrder?.length ? { projectOrder: next.projectOrder } : {}),
         ...(next.projectNames && Object.keys(next.projectNames).length > 0 ? { projectNames: next.projectNames } : {}),
+        ...(next.folders?.length ? { folders: next.folders } : {}),
+        ...(next.folderAssignments && Object.keys(next.folderAssignments).length > 0
+          ? { folderAssignments: next.folderAssignments }
+          : {}),
         ...extras,
       };
       writePrivateFileAtomicSync(path, JSON.stringify(document, null, 2) + "\n");
@@ -257,20 +261,31 @@ export function updateSessionUiState(request: SessionUiStateRequest, path?: stri
   return editState(target, (state) => applySessionUiStateRequest(state, request, Date.now()));
 }
 
-/** Removes those session entries; no-op (no write) if none present. */
+/** Removes those session entries (pin/archive and folder assignment); no-op (no write) if none present. */
 export async function forgetSessionUiState(ids: Iterable<string>, path?: string): Promise<void> {
   const target = path ?? getSessionUiStatePath();
   const wanted = [...new Set(ids)];
   if (wanted.length === 0) return;
-  const has = (state: SessionUiState) => wanted.some((id) => Object.prototype.hasOwnProperty.call(state.sessions, id));
-  // Deleting a session must not lock or create anything when it had no pin or archive time.
+  const hasAssignment = (state: SessionUiState, id: string) => Boolean(state.folderAssignments
+    && Object.prototype.hasOwnProperty.call(state.folderAssignments, id));
+  const has = (state: SessionUiState) => wanted.some((id) => Object.prototype.hasOwnProperty.call(state.sessions, id) || hasAssignment(state, id));
+  // Deleting a session must not lock or create anything when it had no pin, archive time or folder.
   // A file that cannot be read throws here: the locked read could not do better.
   if (!has(loadState(target))) return;
   await editState(target, (state) => {
     if (!has(state)) return { state, changed: false };
     const sessions = { ...state.sessions };
     for (const id of wanted) delete sessions[id];
-    return { state: { ...state, sessions }, changed: true };
+    let folderAssignments = state.folderAssignments;
+    if (folderAssignments) {
+      const nextAssignments = { ...folderAssignments };
+      for (const id of wanted) delete nextAssignments[id];
+      folderAssignments = Object.keys(nextAssignments).length > 0 ? nextAssignments : undefined;
+    }
+    const updated: SessionUiState = { ...state, sessions };
+    if (folderAssignments) updated.folderAssignments = folderAssignments;
+    else delete updated.folderAssignments;
+    return { state: updated, changed: true };
   });
 }
 

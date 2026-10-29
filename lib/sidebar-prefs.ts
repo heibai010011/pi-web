@@ -1,7 +1,7 @@
 /**
  * Per-browser sidebar preferences: the active tab (sessions or files), the
  * user's explicit project group expand/collapse choices, the archive view's
- * folded projects, whether the pinned section is collapsed, whether the files section below the sessions is
+ * folded projects, the session folders folded here, whether the pinned section is collapsed, whether the files section below the sessions is
  * collapsed, whether the files tab or section lists ignored files, and the
  * folders the worktree listing last found outside git.
  * Best-effort localStorage, like the other sidebar memories: privacy mode or
@@ -18,6 +18,7 @@ const GROUP_EXPANSION_STORAGE_KEY = "pi-web:sidebar-groups-v2";
  */
 const LEGACY_GROUP_EXPANSION_STORAGE_KEY = "pi-web:sidebar-groups";
 const ARCHIVE_COLLAPSED_STORAGE_KEY = "pi-web:sidebar-archive-collapsed";
+const FOLDER_COLLAPSED_STORAGE_KEY = "pi-web:sidebar-folders-collapsed";
 const PINNED_COLLAPSED_STORAGE_KEY = "pi-web:sidebar-pins-collapsed";
 const SHOW_IGNORED_FILES_STORAGE_KEY = "pi-web:sidebar-files-show-ignored";
 const FILES_COLLAPSED_STORAGE_KEY = "pi-web:sidebar-files-collapsed";
@@ -160,8 +161,38 @@ export function saveArchiveCollapsed(
   }
 }
 
-export function loadPinnedCollapsed(storage: StorageLike | null = getBrowserStorage()): boolean {
-  if (!storage) return false;
+/**
+ * The user folders folded in the sidebar (folder ids, oldest choice first).
+ * Per browser, like the archive's folded projects: folding a folder on one
+ * machine leaves it open on another.
+ */
+export function loadFolderCollapsed(storage: StorageLike | null = getBrowserStorage()): string[] {
+  if (!storage) return [];
+  try {
+    const raw = storage.getItem(FOLDER_COLLAPSED_STORAGE_KEY);
+    const value: unknown = raw === null ? [] : JSON.parse(raw);
+    if (!Array.isArray(value)) return [];
+    const ids = value.filter((id): id is string => typeof id === "string" && id !== "");
+    return [...new Set(ids)].slice(-MAX_GROUP_EXPANSION_ENTRIES);
+  } catch {
+    return [];
+  }
+}
+
+/** Keeps the newest 300 ids; to mark one as recent, put it last. */
+export function saveFolderCollapsed(
+  ids: readonly string[],
+  storage: StorageLike | null = getBrowserStorage(),
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(FOLDER_COLLAPSED_STORAGE_KEY, JSON.stringify([...new Set(ids)].slice(-MAX_GROUP_EXPANSION_ENTRIES)));
+  } catch {
+    // Persistence is best-effort.
+  }
+}
+
+export function loadPinnedCollapsed(storage: StorageLike | null = getBrowserStorage()): boolean {  if (!storage) return false;
   try {
     return storage.getItem(PINNED_COLLAPSED_STORAGE_KEY) === "true";
   } catch {

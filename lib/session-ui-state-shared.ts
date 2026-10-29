@@ -28,6 +28,36 @@ export const MAX_PROJECT_NAME_LENGTH = 80;
 export const MAX_PROJECT_NAMES = 1000;
 /** Most UTF-8 bytes `projectNames` takes as JSON: its keys are projectKeys, as long as the order's. */
 export const PROJECT_NAMES_MAX_BYTES = 256 * 1024;
+/** Most user folders the sidebar holds, across every project. */
+export const MAX_SESSION_FOLDERS = 500;
+/** Most session→folder assignments one state may carry. */
+export const MAX_FOLDER_ASSIGNMENTS = 20_000;
+/** Most characters a folder's name may have. */
+export const MAX_FOLDER_NAME_LENGTH = 80;
+/** Most characters a folder's auto-classify rule may have. */
+export const MAX_FOLDER_PATTERN_LENGTH = 200;
+
+/**
+ * Explicitly keep a family outside any folder: it also stops the parent's
+ * folder from being inherited (the move menu's "Ungrouped").
+ */
+export const FOLDER_UNGROUPED = "__pi-web-ungrouped__";
+
+/**
+ * A user-created folder of the session sidebar. Folders nest (`parentId`; an
+ * absent or dangling parent reads as top level), belong to one project's group
+ * and may carry an auto-classify rule: the first folder of the project whose
+ * `autoPattern` is a case-insensitive substring of an unplaced family's cwd
+ * takes it.
+ */
+export interface SessionUiFolder {
+  id: string;
+  name: string;
+  /** `workspaceKeyOf` of the project group that shows the folder. */
+  projectKey: string;
+  parentId?: string | null;
+  autoPattern?: string;
+}
 
 /** Epoch ms, keyed by the FAMILY ROOT session id. */
 export interface SessionUiFamilyState { pinnedAt?: number; archivedAt?: number }
@@ -52,6 +82,17 @@ export interface SessionUiState {
    * they are. Absent while empty.
    */
   projectNames?: Record<string, string>;
+  /**
+   * The user's folders, in creation order (which is also the auto-classify
+   * rule order), across every project. Absent while empty.
+   */
+  folders?: SessionUiFolder[];
+  /**
+   * Folder of a FAMILY ROOT session id, or FOLDER_UNGROUPED for an explicit
+   * "no folder". An id without an entry inherits its parent's folder. Absent
+   * while empty.
+   */
+  folderAssignments?: Record<string, string>;
 }
 /** Where a moved project goes, next to its anchor. */
 export type ProjectMovePosition = "before" | "after";
@@ -73,7 +114,18 @@ export type SessionUiStateRequest =
    */
   | { action: "move-project"; projectKey: string; anchorKey: string; position: ProjectMovePosition; add: string[] }
   /** A project's display name; null (or an empty name) removes it, and the folder name shows again. */
-  | { action: "rename-project"; projectKey: string; name: string | null };
+  | { action: "rename-project"; projectKey: string; name: string | null }
+  /** A new user folder at `parentId` (null: top level); the client chooses the id. */
+  | { action: "create-folder"; id: string; name: string; projectKey: string; parentId: string | null }
+  | { action: "rename-folder"; id: string; name: string }
+  /** Nest a folder under `parentId`, or make it top level with null. Cycles are ignored. */
+  | { action: "move-folder"; id: string; parentId: string | null }
+  /** A folder's auto-classify rule; null removes it. */
+  | { action: "set-folder-rule"; id: string; autoPattern: string | null }
+  /** Removes a folder: its children move up to its parent, its sessions become ungrouped. */
+  | { action: "delete-folder"; id: string }
+  /** A family's folder; null files it under FOLDER_UNGROUPED (never inherited). */
+  | { action: "move-session"; sessionId: string; folderId: string | null };
 
 export interface SessionUiStateResponse { state: SessionUiState }
 
@@ -127,6 +179,74 @@ export function projectDisplayName(value: unknown): string | null | undefined {
 export function storedProjectName(state: SessionUiState, projectKey: string): string | undefined {
   const names = state.projectNames;
   return names && hasOwn(names, projectKey) ? names[projectKey] : undefined;
+}
+
+/**
+ * A folder name as it is stored: trimmed, one line, at most
+ * MAX_FOLDER_NAME_LENGTH characters. Null for none (null, or nothing but
+ * spaces). Undefined when `value` is no name: a request is refused for it and
+ * the file drops that folder.
+ */
+export function folderDisplayName(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const name = value.trim();
+  if (!name) return null;
+  if (NOT_ONE_LINE.test(name) || [...name].length > MAX_FOLDER_NAME_LENGTH) return undefined;
+  return name;
+}
+
+/** An auto-classify rule: trimmed one-line text up to MAX_FOLDER_PATTERN_LENGTH; null clears it; undefined refuses it. */
+export function folderAutoPattern(value: unknown): string | null | undefined {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") return undefined;
+  const pattern = value.trim();
+  if (!pattern) return null;
+  if (NOT_ONE_LINE.test(pattern) || [...pattern].length > MAX_FOLDER_PATTERN_LENGTH) return undefined;
+  return pattern;
+}
+
+/** Would nesting `id` under `parentId` make a loop (or nest it in itself)? */
+export function folderWouldCycle(
+  folders: readonly Pick<SessionUiFolder, "id" | "parentId">[],
+  id: string,
+  parentId: string | null,
+): boolean {
+  if (parentId === null) return false;
+  if (parentId === id) return true;
+  const byId = new Map(folders.map((folder) => [folder.id, folder]));
+  const seen = new Set<string>([id]);
+  let current: string | null = parentId;
+  while (current !== null) {
+    if (seen.has(current)) return true;
+    seen.add(current);
+    const parent: string | null | undefined = byId.get(current)?.parentId;
+    current = typeof parent === "string" && parent.length > 0 ? parent : null;
+  }
+  return false;
+}
+
+/** Every folder below `id` (not `id` itself), cycle-safe. */
+export function folderDescendantIds(
+  folders: readonly Pick<SessionUiFolder, "id" | "parentId">[],
+  id: string,
+): Set<string> {
+  const childrenOf = new Map<string, string[]>();
+  for (const folder of folders) {
+    if (typeof folder.parentId !== "string" || folder.parentId === folder.id) continue;
+    const list = childrenOf.get(folder.parentId);
+    if (list) list.push(folder.id);
+    else childrenOf.set(folder.parentId, [folder.id]);
+  }
+  const result = new Set<string>();
+  const stack = [...(childrenOf.get(id) ?? [])];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === undefined || current === id || result.has(current)) continue;
+    result.add(current);
+    stack.push(...(childrenOf.get(current) ?? []));
+  }
+  return result;
 }
 
 const utf8 = new TextEncoder();
@@ -242,6 +362,41 @@ export function normalizeSessionUiState(value: unknown): SessionUiState | null {
       bytes += size;
     }
     if (count > 0) state.projectNames = names;
+  }
+  // Folders: malformed entries are dropped one by one (a broken folder must
+  // not take pins, archive or the other folders with it). Dangling parents
+  // stay stored and read as top level when rendered, so a folder that comes
+  // back later can carry its children again.
+  const folderIds = new Set<string>();
+  if (Array.isArray(value.folders)) {
+    const folders: SessionUiFolder[] = [];
+    for (const entry of value.folders) {
+      if (folders.length >= MAX_SESSION_FOLDERS) break;
+      if (!isPlainObject(entry)) continue;
+      const id = entry.id;
+      const name = folderDisplayName(entry.name);
+      if (!isSessionId(id) || folderIds.has(id) || typeof name !== "string" || !isProjectString(entry.projectKey)) continue;
+      const folder: SessionUiFolder = { id, name, projectKey: entry.projectKey };
+      if (isSessionId(entry.parentId) && entry.parentId !== id) folder.parentId = entry.parentId;
+      const pattern = folderAutoPattern(entry.autoPattern);
+      if (typeof pattern === "string") folder.autoPattern = pattern;
+      folders.push(folder);
+      folderIds.add(id);
+    }
+    if (folders.length > 0) state.folders = folders;
+  }
+  // Assignments need a folder (or the explicit-ungrouped marker) to point at.
+  if (isPlainObject(value.folderAssignments)) {
+    const assignments: Record<string, string> = {};
+    let count = 0;
+    for (const [id, folderId] of Object.entries(value.folderAssignments)) {
+      if (count >= MAX_FOLDER_ASSIGNMENTS) break;
+      if (!isSessionId(id) || typeof folderId !== "string") continue;
+      if (folderId !== FOLDER_UNGROUPED && !folderIds.has(folderId)) continue;
+      assignments[id] = folderId;
+      count++;
+    }
+    if (count > 0) state.folderAssignments = assignments;
   }
   return state;
 }
@@ -366,8 +521,63 @@ export function parseSessionUiStateRequest(body: unknown): ParseResult {
       }
       return { ok: true, request: { action: "rename-project", projectKey: body.projectKey, name } };
     }
+    case "create-folder": {
+      if (!isSessionId(body.id)) return { ok: false, error: "id must be a folder id" };
+      const name = folderDisplayName(body.name);
+      if (typeof name !== "string") {
+        return { ok: false, error: `name must be one line of at most ${MAX_FOLDER_NAME_LENGTH} characters` };
+      }
+      if (!isProjectString(body.projectKey)) {
+        return { ok: false, error: `projectKey must be a non-empty string of at most ${MAX_PROJECT_STRING_LENGTH} characters` };
+      }
+      let parentId: string | null = null;
+      if (body.parentId !== undefined && body.parentId !== null) {
+        if (!isSessionId(body.parentId)) return { ok: false, error: "parentId must be null or a folder id" };
+        parentId = body.parentId;
+      }
+      return { ok: true, request: { action: "create-folder", id: body.id, name, projectKey: body.projectKey, parentId } };
+    }
+    case "rename-folder": {
+      if (!isSessionId(body.id)) return { ok: false, error: "id must be a folder id" };
+      const name = folderDisplayName(body.name);
+      if (typeof name !== "string") {
+        return { ok: false, error: `name must be one line of at most ${MAX_FOLDER_NAME_LENGTH} characters` };
+      }
+      return { ok: true, request: { action: "rename-folder", id: body.id, name } };
+    }
+    case "move-folder": {
+      if (!isSessionId(body.id)) return { ok: false, error: "id must be a folder id" };
+      let parentId: string | null = null;
+      if (body.parentId !== undefined && body.parentId !== null) {
+        if (!isSessionId(body.parentId)) return { ok: false, error: "parentId must be null or a folder id" };
+        parentId = body.parentId;
+      }
+      if (parentId === body.id) return { ok: false, error: "a folder cannot move into itself" };
+      return { ok: true, request: { action: "move-folder", id: body.id, parentId } };
+    }
+    case "set-folder-rule": {
+      if (!isSessionId(body.id)) return { ok: false, error: "id must be a folder id" };
+      const autoPattern = folderAutoPattern(body.autoPattern);
+      if (autoPattern === undefined) {
+        return { ok: false, error: `autoPattern must be null or one line of at most ${MAX_FOLDER_PATTERN_LENGTH} characters` };
+      }
+      return { ok: true, request: { action: "set-folder-rule", id: body.id, autoPattern } };
+    }
+    case "delete-folder": {
+      if (!isSessionId(body.id)) return { ok: false, error: "id must be a folder id" };
+      return { ok: true, request: { action: "delete-folder", id: body.id } };
+    }
+    case "move-session": {
+      if (!isSessionId(body.sessionId)) return { ok: false, error: "sessionId must be a session id" };
+      let folderId: string | null = null;
+      if (body.folderId !== undefined && body.folderId !== null) {
+        if (!isSessionId(body.folderId)) return { ok: false, error: "folderId must be null or a folder id" };
+        folderId = body.folderId;
+      }
+      return { ok: true, request: { action: "move-session", sessionId: body.sessionId, folderId } };
+    }
     default:
-      return { ok: false, error: "action must be \"set\", \"restore\", \"pin-project\", \"add-projects\", \"move-project\" or \"rename-project\"" };
+      return { ok: false, error: "action must be \"set\", \"restore\", \"pin-project\", \"add-projects\", \"move-project\", \"rename-project\", \"create-folder\", \"rename-folder\", \"move-folder\", \"set-folder-rule\", \"delete-folder\" or \"move-session\"" };
   }
 }
 
@@ -424,6 +634,8 @@ function copyState(state: SessionUiState): SessionUiState {
   // Only when present: an explicit undefined would not equal an absent field.
   if (state.projectOrder) copy.projectOrder = [...state.projectOrder];
   if (state.projectNames) copy.projectNames = { ...state.projectNames };
+  if (state.folders) copy.folders = state.folders.map((folder) => ({ ...folder }));
+  if (state.folderAssignments) copy.folderAssignments = { ...state.folderAssignments };
   return copy;
 }
 
@@ -547,6 +759,26 @@ function capProjectOrder(order: string[], keep: ReadonlySet<string>): string[] {
 }
 
 /**
+ * Stores one updated folder (the same object when nothing changed) and says
+ * whether that changed anything. Unknown ids change nothing.
+ */
+function writeFolder(state: SessionUiState, id: string, update: (folder: SessionUiFolder) => SessionUiFolder): boolean {
+  const folders = state.folders;
+  if (!folders) return false;
+  const index = folders.findIndex((folder) => folder.id === id);
+  if (index < 0) return false;
+  const current = folders[index];
+  const updated = update(current);
+  if (updated.name === current.name && updated.parentId === current.parentId && updated.autoPattern === current.autoPattern) {
+    return false;
+  }
+  const next = [...folders];
+  next[index] = updated;
+  state.folders = next;
+  return true;
+}
+
+/**
  * Pure. Returns a NEW state (never mutates input) and whether anything changed. Does NOT touch revision.
  * The project order never depends on `now`, and its requests are relative
  * (keys added if missing, one key placed next to one anchor), so a replay or
@@ -612,6 +844,95 @@ export function applySessionUiStateRequest(
       // copy goes through the same rule, so a name the server refuses changes nothing.
       const name = projectDisplayName(request.name);
       if (name !== undefined && writeProjectName(next, request.projectKey, name)) changed = true;
+      break;
+    }
+    case "create-folder": {
+      const name = folderDisplayName(request.name);
+      const folders = next.folders ?? [];
+      if (typeof name !== "string" || !isSessionId(request.id) || !isProjectString(request.projectKey)) break;
+      if (folders.length >= MAX_SESSION_FOLDERS || folders.some((folder) => folder.id === request.id)) break;
+      const parentId = request.parentId !== null && folders.some((folder) => folder.id === request.parentId)
+        ? request.parentId
+        : null;
+      const folder: SessionUiFolder = { id: request.id, name, projectKey: request.projectKey };
+      if (parentId) folder.parentId = parentId;
+      next.folders = [...folders, folder];
+      changed = true;
+      break;
+    }
+    case "rename-folder": {
+      const name = folderDisplayName(request.name);
+      if (typeof name === "string" && writeFolder(next, request.id, (folder) => ({ ...folder, name }))) changed = true;
+      break;
+    }
+    case "move-folder": {
+      const folders = next.folders ?? [];
+      if (!folders.some((folder) => folder.id === request.id)) break;
+      if (request.parentId !== null) {
+        if (!folders.some((folder) => folder.id === request.parentId)) break;
+        if (folderWouldCycle(folders, request.id, request.parentId)) break;
+      }
+      if (writeFolder(next, request.id, (folder) => {
+        const updated: SessionUiFolder = { ...folder };
+        if (request.parentId === null) delete updated.parentId;
+        else updated.parentId = request.parentId;
+        return updated;
+      })) changed = true;
+      break;
+    }
+    case "set-folder-rule": {
+      const pattern = folderAutoPattern(request.autoPattern);
+      if (pattern === undefined) break;
+      if (writeFolder(next, request.id, (folder) => {
+        const updated: SessionUiFolder = { ...folder };
+        if (pattern === null) delete updated.autoPattern;
+        else updated.autoPattern = pattern;
+        return updated;
+      })) changed = true;
+      break;
+    }
+    case "delete-folder": {
+      const folders = next.folders ?? [];
+      const target = folders.find((folder) => folder.id === request.id);
+      if (!target) break;
+      // Children move up to the deleted folder's parent (top level when it
+      // had none); sessions filed there become ungrouped, never deleted.
+      const parentId = target.parentId && folders.some((folder) => folder.id === target.parentId) ? target.parentId : null;
+      next.folders = folders
+        .filter((folder) => folder.id !== request.id)
+        .map((folder) => {
+          if (folder.parentId !== request.id) return folder;
+          const moved: SessionUiFolder = { ...folder };
+          if (parentId === null) delete moved.parentId;
+          else moved.parentId = parentId;
+          return moved;
+        });
+      if (next.folders.length === 0) delete next.folders;
+      if (next.folderAssignments) {
+        const assignments = { ...next.folderAssignments };
+        let dropped = false;
+        for (const [sessionId, folderId] of Object.entries(assignments)) {
+          if (folderId !== request.id) continue;
+          delete assignments[sessionId];
+          dropped = true;
+        }
+        if (dropped) {
+          if (Object.keys(assignments).length === 0) delete next.folderAssignments;
+          else next.folderAssignments = assignments;
+        }
+      }
+      changed = true;
+      break;
+    }
+    case "move-session": {
+      const folderId = request.folderId ?? FOLDER_UNGROUPED;
+      if (folderId !== FOLDER_UNGROUPED && !(next.folders ?? []).some((folder) => folder.id === folderId)) break;
+      const assignments = { ...next.folderAssignments };
+      if (assignments[request.sessionId] === folderId) break;
+      if (!hasOwn(assignments, request.sessionId) && Object.keys(assignments).length >= MAX_FOLDER_ASSIGNMENTS) break;
+      assignments[request.sessionId] = folderId;
+      next.folderAssignments = assignments;
+      changed = true;
       break;
     }
   }

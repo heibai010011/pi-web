@@ -736,6 +736,126 @@ a.session-tree-main {
   color: var(--text);
 }
 
+/* A user folder in a project group: a section header one step in from the
+   project's sessions, its name and count, and ⋯ on hover. Its sessions step
+   in by depth (the inline padding SessionTree gives them), so a subfolder's
+   rows line up under their parent's. */
+.session-tree-folder {
+  right: var(--session-tree-inset-right);
+  left: var(--session-tree-inset-left);
+  gap: 2px;
+  padding-right: 4px;
+  border-radius: 7px;
+  color: var(--text-muted);
+}
+
+.session-tree-folder:hover {
+  background: var(--bg-hover);
+}
+
+.session-tree-folder-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.session-tree-folder.is-collapsed .session-tree-folder-toggle {
+  color: var(--text-dim);
+}
+
+.session-tree-folder:hover .session-tree-folder-toggle {
+  color: var(--text);
+}
+
+.session-tree-folder-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The auto-classify rule, as the text it matches (the menu edits it). */
+.session-tree-folder-rule {
+  flex: none;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.session-tree-folder-count {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-tree-folder-actions {
+  display: none;
+  flex: none;
+  align-items: center;
+}
+
+.session-tree-folder:hover .session-tree-folder-actions,
+.session-tree-folder.is-active .session-tree-folder-actions {
+  display: flex;
+}
+
+.session-tree-folder:hover .session-tree-folder-count,
+.session-tree-folder.is-active .session-tree-folder-count {
+  display: none;
+}
+
+.session-tree .session-tree-folder-action {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--text-dim);
+}
+
+.session-tree .session-tree-folder-action:hover,
+.session-tree .session-tree-folder-action.is-active {
+  background: var(--bg-selected);
+  color: var(--text);
+}
+
+.session-tree-folder.is-confirming {
+  gap: 5px;
+  background: rgba(239, 68, 68, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.35);
+}
+
+.session-tree.is-mobile .session-tree-folder-toggle {
+  font-size: 13px;
+}
+
+.session-tree.is-mobile .session-tree-folder-action {
+  width: 32px;
+  height: 32px;
+}
+
+.session-tree.is-mobile .session-tree-folder-actions {
+  display: flex;
+}
+
 /* In the text column, with the session titles. */
 .session-tree-group-empty,
 .session-tree-more {

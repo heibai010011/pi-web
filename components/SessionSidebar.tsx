@@ -32,6 +32,7 @@ import {
   forgetRetiredSidebarKeys,
   loadArchiveCollapsed,
   loadFilesCollapsed,
+  loadFolderCollapsed,
   loadGroupExpansion,
   loadNonGitCwds,
   loadPinnedCollapsed,
@@ -40,6 +41,7 @@ import {
   rememberCwdGitStatus,
   saveArchiveCollapsed,
   saveFilesCollapsed,
+  saveFolderCollapsed,
   saveGroupExpansion,
   savePinnedCollapsed,
   saveShowIgnoredFiles,
@@ -69,9 +71,12 @@ import {
 } from "@/lib/new-session-context";
 import {
   chunkForSessionUiRequests,
+  FOLDER_UNGROUPED,
+  folderDescendantIds,
   MAX_PROJECT_ORDER_KEYS,
   MAX_SESSION_UI_IDS_PER_REQUEST,
   type ProjectMovePosition,
+  type SessionUiFolder,
   type SessionUiStateRequest,
 } from "@/lib/session-ui-state-shared";
 import { focusIfLost, type FocusDocument } from "@/lib/stacked-dialog";
@@ -100,6 +105,7 @@ import {
   DotOutlineIcon,
   EyeIcon,
   FolderIcon,
+  FolderPlusIcon,
   MessageIcon,
   MoreIcon,
   ForkIcon,
@@ -293,7 +299,13 @@ type SidebarMenuState =
   | { kind: "row"; row: SessionRow; anchor: SidebarMenuAnchor; opener: HTMLElement | null }
   | { kind: "group"; project: SidebarProject; olderCount: number; anchor: SidebarMenuAnchor; opener: HTMLElement; askDelete?: boolean }
   | { kind: "archive-group"; project: SidebarProject; anchor: SidebarMenuAnchor; opener: HTMLElement; askDelete?: boolean }
-  | { kind: "archive"; anchor: SidebarMenuAnchor; opener: HTMLElement; askDelete?: ArchiveDeleteScope };
+  | { kind: "archive"; anchor: SidebarMenuAnchor; opener: HTMLElement; askDelete?: ArchiveDeleteScope }
+  /** A user folder's ⋯: new subfolder, rename, rule, move, delete. */
+  | { kind: "folder"; folder: SessionUiFolder; anchor: SidebarMenuAnchor; opener: HTMLElement }
+  /** The chosen folder of a session's "Move to folder…" (a second step of its row menu). */
+  | { kind: "move-to-folder"; row: SessionRow; anchor: SidebarMenuAnchor; opener: HTMLElement | null }
+  /** A folder's "Move folder…": its new parent, or the top level. */
+  | { kind: "move-folder"; folder: SessionUiFolder; anchor: SidebarMenuAnchor; opener: HTMLElement };
 
 /** The archive bar's deletes: every archived session, or those archived over 30 days ago. */
 type ArchiveDeleteScope = "all" | "old";
@@ -330,6 +342,7 @@ const SESSION_ACTION_LABEL_KEYS: Record<SessionMenuActionId, string> = {
   unpin: "sidebar.unpin",
   rename: "sidebar.rename",
   fork: "sidebar.fork",
+  "move-to-folder": "sidebar.moveToFolder",
   "mark-read": "sidebar.markRead",
   "mark-unread": "sidebar.markUnread",
   archive: "sidebar.archive",
@@ -344,6 +357,7 @@ function sessionActionIcon(id: SessionMenuActionId): ReactNode {
     case "unpin": return <PinOffIcon />;
     case "rename": return <PencilIcon />;
     case "fork": return <ForkIcon />;
+    case "move-to-folder": return <FolderIcon />;
     case "mark-read": return <DotOutlineIcon />;
     case "mark-unread": return <DotIcon />;
     case "archive": return <ArchiveIcon />;
@@ -500,6 +514,16 @@ function buttonAnchor(element: HTMLElement, align: "start" | "end"): SidebarMenu
   return { kind: "rect", rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }, align };
 }
 
+/**
+ * A new folder's id: a UUID, which SESSION_ID_PATTERN (and the server's rule)
+ * takes; older browsers without `randomUUID` fall back to a time-random id.
+ */
+function newFolderId(): string {
+  const cryptoApi = globalThis.crypto;
+  if (cryptoApi && typeof cryptoApi.randomUUID === "function") return cryptoApi.randomUUID();
+  return `folder-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, controlRef, onNewSessionContextChange, initialSessionId, initialSessionLinked, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
@@ -585,6 +609,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
   // The archive view's folded projects, per browser (lib/sidebar-prefs.ts).
   const [archiveCollapsed, setArchiveCollapsed] = useState<readonly string[]>([]);
+  // The user folders folded here, per browser (their nesting itself is state).
+  const [folderCollapsed, setFolderCollapsed] = useState<readonly string[]>([]);
+  // Inline folder editors, like renamingRootId and confirmDeleteRootId for sessions.
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
+  const [ruleFolderId, setRuleFolderId] = useState<string | null>(null);
+  const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null);
   const [archiveView, setArchiveViewState] = useState(false);
   // The fold and the archive view move (hooks/useSidebarMotion.ts): only
   // when the user folds or goes in or out, never on a restore, a drag, keys,
@@ -739,6 +769,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (loadPinnedCollapsed()) setPinnedCollapsed(true);
     const archiveFolds = loadArchiveCollapsed();
     if (archiveFolds.length > 0) setArchiveCollapsed(archiveFolds);
+    const folderFolds = loadFolderCollapsed();
+    if (folderFolds.length > 0) setFolderCollapsed(folderFolds);
     if (loadFilesCollapsed()) setFilesCollapsed(true);
     if (loadShowIgnoredFiles()) setShowIgnoredFiles(true);
     forgetRetiredSidebarKeys();
@@ -1416,6 +1448,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     () => effectiveGroupExpansion(groupExpansion, keptOpenGroups),
     [groupExpansion, keptOpenGroups],
   );
+  const folderCollapsedSet = useMemo(() => new Set(folderCollapsed), [folderCollapsed]);
   const model = useMemo(() => buildSessionTree({
     sessions: allSessions,
     uiState,
@@ -1427,7 +1460,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     groupExpansion: shownGroupExpansion,
     moreShown,
     pinnedCollapsed,
-  }), [allSessions, uiState, runningSessionIds, awaitingInputSessionIds, unreadSessionIds, selectedSessionId, currentProject, shownGroupExpansion, moreShown, pinnedCollapsed]);
+    folderCollapsed: folderCollapsedSet,
+  }), [allSessions, uiState, runningSessionIds, awaitingInputSessionIds, unreadSessionIds, selectedSessionId, currentProject, shownGroupExpansion, moreShown, pinnedCollapsed, folderCollapsedSet]);
   // Built while the archive view is rendered, its way out included: it
   // leaves as it was, not empty.
   const archiveMounted = archiveMotion.archiveMounted;
@@ -1993,6 +2027,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       case "unpin": setFamilyPinned(family, false); break;
       case "rename": startRename(family); break;
       case "fork": void forkFamily(row); break;
+      // Handled in sessionMenuItems: it swaps the row menu for the folder list
+      // in place, so the menu keeps its anchor.
+      case "move-to-folder": break;
       case "mark-read": markFamilyRead(family, true); break;
       case "mark-unread": markFamilyRead(family, false); break;
       case "archive": archiveFamily(family); break;
@@ -2005,6 +2042,87 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (row.status.transient) return;
     setMenu({ kind: "row", row, anchor, opener });
   }, []);
+
+  // Session folders: user-named groups inside a project's tree. Their nesting
+  // and the sessions filed in them live in the same server state as pins and
+  // the project order (`lib/session-ui-state.ts`), so another window sees them;
+  // only which folders are folded belongs to this browser (`lib/sidebar-prefs.ts`).
+  const saveFolderFolds = useCallback((next: readonly string[]) => {
+    setFolderCollapsed(next);
+    saveFolderCollapsed(next);
+  }, []);
+
+  const handleToggleFolder = useCallback((folderId: string) => {
+    const folded = folderCollapsed.includes(folderId);
+    saveFolderFolds(folded ? folderCollapsed.filter((id) => id !== folderId) : [...folderCollapsed, folderId]);
+  }, [folderCollapsed, saveFolderFolds]);
+
+  // A new folder opens as a name field, like a project's Rename…: the default
+  // name stays if the user just clicks away.
+  const createFolder = useCallback((projectKey: string, parentId: string | null): string => {
+    const id = newFolderId();
+    void applyUiStateRequest({
+      action: "create-folder",
+      id,
+      name: t("sidebar.newFolder"),
+      projectKey,
+      parentId,
+    });
+    setRenamingFolderId(id);
+    return id;
+  }, [applyUiStateRequest, t]);
+
+  const startFolderRename = useCallback((folder: SessionUiFolder) => setRenamingFolderId(folder.id), []);
+  const commitFolderRename = useCallback((folder: SessionUiFolder, value: string) => {
+    setRenamingFolderId(null);
+    const name = value.trim();
+    if (!name || name === folder.name) return;
+    void applyUiStateRequest({ action: "rename-folder", id: folder.id, name });
+  }, [applyUiStateRequest]);
+  const cancelFolderRename = useCallback(() => setRenamingFolderId(null), []);
+
+  const startFolderRule = useCallback((folder: SessionUiFolder) => setRuleFolderId(folder.id), []);
+  const commitFolderRule = useCallback((folder: SessionUiFolder, value: string) => {
+    setRuleFolderId(null);
+    const pattern = value.trim();
+    if ((folder.autoPattern ?? "") === pattern) return;
+    void applyUiStateRequest({ action: "set-folder-rule", id: folder.id, autoPattern: pattern || null });
+  }, [applyUiStateRequest]);
+  const cancelFolderRule = useCallback(() => setRuleFolderId(null), []);
+
+  const askFolderDelete = useCallback((folder: SessionUiFolder) => setDeletingFolderId(folder.id), []);
+  const cancelFolderDelete = useCallback(() => setDeletingFolderId(null), []);
+  const confirmFolderDelete = useCallback((folder: SessionUiFolder) => {
+    setDeletingFolderId(null);
+    if (renamingFolderId === folder.id) setRenamingFolderId(null);
+    if (ruleFolderId === folder.id) setRuleFolderId(null);
+    if (folderCollapsed.includes(folder.id)) saveFolderFolds(folderCollapsed.filter((id) => id !== folder.id));
+    void applyUiStateRequest({ action: "delete-folder", id: folder.id });
+  }, [applyUiStateRequest, folderCollapsed, renamingFolderId, ruleFolderId, saveFolderFolds]);
+
+  const moveSessionToFolder = useCallback((row: SessionRow, folderId: string | null) => {
+    void applyUiStateRequest({ action: "move-session", sessionId: row.family.root.id, folderId });
+  }, [applyUiStateRequest]);
+
+  const moveFolderTo = useCallback((folder: SessionUiFolder, parentId: string | null) => {
+    void applyUiStateRequest({ action: "move-folder", id: folder.id, parentId });
+  }, [applyUiStateRequest]);
+
+  // "New folder…" in a session's move menu: create it and file that session
+  // there, then let the new row be named. A refused create files nothing.
+  const createFolderForRow = useCallback(async (row: SessionRow) => {
+    const id = newFolderId();
+    const created = await applyUiStateRequest({
+      action: "create-folder",
+      id,
+      name: t("sidebar.newFolder"),
+      projectKey: row.project.key,
+      parentId: null,
+    });
+    if (!created) return;
+    await applyUiStateRequest({ action: "move-session", sessionId: row.family.root.id, folderId: id });
+    setRenamingFolderId(id);
+  }, [applyUiStateRequest, t]);
 
   // Right-click: an extension listening for the downstream event (a pi-web
   // integration) claims the row first; only an unclaimed event opens the
@@ -2302,9 +2420,28 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     else filesPickerRef.current?.button("project")?.focus({ preventScroll: true });
   }, [filesShown, filesFocusRequest]);
 
-  const sessionMenuItems = (row: SessionRow): SidebarMenuItem[] => sessionMenuEntries(row.context, row.status).map((entry, index) => {
+  const sessionFolders = (projectKey: string): SessionUiFolder[] => (uiState.folders ?? []).filter((folder) => folder.projectKey === projectKey);
+
+  const sessionMenuItems = (row: SessionRow): SidebarMenuItem[] => sessionMenuEntries(row.context, row.status).map((entry, index): SidebarMenuItem => {
     if (entry.kind === "separator") return { type: "separator", id: `separator-${index}` };
     const label = t(SESSION_ACTION_LABEL_KEYS[entry.id]);
+    if (entry.id === "move-to-folder") {
+      // The folder list opens in this menu's place (same anchor and opener):
+      // one step back, then the choice.
+      return {
+        type: "item",
+        id: entry.id,
+        label,
+        icon: sessionActionIcon(entry.id),
+        shortcut: entry.shortcut,
+        onSelect: ({ keepOpen }) => {
+          keepOpen();
+          setMenu((current) => (current?.kind === "row"
+            ? { kind: "move-to-folder", row: current.row, anchor: current.anchor, opener: current.opener }
+            : current));
+        },
+      };
+    }
     return {
       type: "item",
       id: entry.id,
@@ -2317,6 +2454,114 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       onSelect: ({ shiftKey }) => runSessionAction(entry.id, row, shiftKey),
     };
   });
+
+  /**
+   * A session's folder choices: the project's folders (checked = its current
+   * explicit folder), Ungrouped (breaks the parent's inheritance) and New
+   * folder…, which creates one and files the session there at once.
+   */
+  const sessionFolderMenuItems = (row: SessionRow): SidebarMenuItem[] => {
+    const folders = sessionFolders(row.project.key);
+    const assigned = uiState.folderAssignments?.[row.family.root.id];
+    const items: SidebarMenuItem[] = folders.map((folder) => ({
+      type: "item",
+      id: `folder:${folder.id}`,
+      label: folder.name,
+      checked: assigned === folder.id,
+      onSelect: () => moveSessionToFolder(row, folder.id),
+    }));
+    if (items.length === 0) {
+      items.push({ type: "item", id: "no-folders", label: t("sidebar.noFoldersYet"), disabled: true, onSelect: () => {} });
+    }
+    items.push({ type: "separator", id: "folder-separator" });
+    items.push({
+      type: "item",
+      id: "ungrouped",
+      label: t("sidebar.ungrouped"),
+      checked: assigned === FOLDER_UNGROUPED,
+      onSelect: () => moveSessionToFolder(row, null),
+    });
+    items.push({
+      type: "item",
+      id: "new-folder",
+      label: t("sidebar.newFolder"),
+      icon: <FolderPlusIcon />,
+      onSelect: () => { void createFolderForRow(row); },
+    });
+    return items;
+  };
+
+  /** A folder's destinations for "Move folder…": every folder outside its own subtree, plus the top level. */
+  const folderMoveMenuItems = (folder: SessionUiFolder): SidebarMenuItem[] => {
+    const folders = sessionFolders(folder.projectKey);
+    const descendants = folderDescendantIds(folders, folder.id);
+    const items: SidebarMenuItem[] = folders
+      .filter((other) => other.id !== folder.id && !descendants.has(other.id))
+      .map((target) => ({
+        type: "item",
+        id: `parent:${target.id}`,
+        label: target.name,
+        checked: (folder.parentId ?? null) === target.id,
+        onSelect: () => moveFolderTo(folder, target.id),
+      }));
+    if (folder.parentId) {
+      items.push({ type: "item", id: "top-level", label: t("sidebar.moveToTopLevel"), onSelect: () => moveFolderTo(folder, null) });
+    }
+    if (items.length === 0) {
+      items.push({ type: "item", id: "no-targets", label: t("sidebar.noFoldersYet"), disabled: true, onSelect: () => {} });
+    }
+    return items;
+  };
+
+  const folderMenuItems = (folder: SessionUiFolder): SidebarMenuItem[] => {
+    const folders = sessionFolders(folder.projectKey);
+    const descendants = folderDescendantIds(folders, folder.id);
+    const canMove = folders.some((other) => other.id !== folder.id && !descendants.has(other.id)) || Boolean(folder.parentId);
+    return [
+      {
+        type: "item",
+        id: "new-subfolder",
+        label: t("sidebar.newSubfolder"),
+        icon: <FolderPlusIcon />,
+        onSelect: () => { createFolder(folder.projectKey, folder.id); },
+      },
+      {
+        type: "item",
+        id: "rename-folder",
+        label: t("sidebar.renameFolder"),
+        icon: <PencilIcon />,
+        onSelect: () => startFolderRename(folder),
+      },
+      {
+        type: "item",
+        id: "folder-rule",
+        label: folder.autoPattern ? t("sidebar.folderRuleEdit") : t("sidebar.folderRule"),
+        onSelect: () => startFolderRule(folder),
+      },
+      {
+        type: "item",
+        id: "move-folder",
+        label: t("sidebar.moveFolder"),
+        icon: <FolderIcon />,
+        disabled: !canMove,
+        onSelect: ({ keepOpen }) => {
+          keepOpen();
+          setMenu((current) => (current?.kind === "folder"
+            ? { kind: "move-folder", folder, anchor: current.anchor, opener: current.opener }
+            : current));
+        },
+      },
+      { type: "separator", id: "folder-separator" },
+      {
+        type: "item",
+        id: "delete-folder",
+        label: t("sidebar.deleteFolder"),
+        icon: <TrashIcon />,
+        danger: true,
+        onSelect: () => askFolderDelete(folder),
+      },
+    ];
+  };
 
   const groupMenuItems = (project: SidebarProject, olderCount: number): SidebarMenuItem[] => {
     const archivedCount = archiveIndex.countByProject.get(project.key) ?? 0;
@@ -2596,13 +2841,35 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     menuItems = archiveMenuItems();
     if (menu.askDelete) menuBody = archiveDeleteBody(menu.askDelete, null);
     menuWidth = 280;
+  } else if (menu?.kind === "folder") {
+    // The folder as the shared state has it now (renamed or moved in another window meanwhile).
+    const folder = (uiState.folders ?? []).find((item) => item.id === menu.folder.id) ?? menu.folder;
+    menuTitle = folder.name;
+    menuLabel = t("sidebar.folderActions", { name: folder.name });
+    menuItems = folderMenuItems(folder);
+    menuWidth = 240;
+  } else if (menu?.kind === "move-to-folder") {
+    const row = menu.row;
+    menuTitle = sessionRowTitle(row.family.root);
+    menuLabel = t("sidebar.moveToFolder");
+    menuItems = sessionFolderMenuItems(row);
+    menuWidth = 240;
+  } else if (menu?.kind === "move-folder") {
+    const folder = (uiState.folders ?? []).find((item) => item.id === menu.folder.id) ?? menu.folder;
+    menuTitle = folder.name;
+    menuLabel = t("sidebar.moveFolder");
+    menuItems = folderMoveMenuItems(folder);
+    menuWidth = 240;
   }
 
   // The tree row (and the button in it) that the open menu belongs to.
   const activeMenuRowKey = menu?.kind === "row"
     ? menu.row.key
     : menu?.kind === "group" ? `group:${menu.project.key}`
-    : menu?.kind === "archive-group" ? `archive:${menu.project.key}` : null;
+    : menu?.kind === "archive-group" ? `archive:${menu.project.key}`
+    : menu?.kind === "folder" ? `folder:${menu.folder.id}`
+    : menu?.kind === "move-folder" ? `folder:${menu.folder.id}`
+    : menu?.kind === "move-to-folder" ? menu.row.key : null;
 
   const treeLayout = isMobile ? "mobile" : "desktop";
   // Until pins and archive have loaded, archived rows would flash in.
@@ -2637,6 +2904,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     },
     onGroupNew: handleGroupNew,
     onGroupMenu: handleGroupMenu,
+    onToggleFolder: handleToggleFolder,
+    onFolderMenu: (folder: SessionUiFolder, opener: HTMLElement) => {
+      setMenu({ kind: "folder", folder, anchor: buttonAnchor(opener, "end"), opener });
+    },
+    renamingFolderId,
+    onFolderRenameCommit: commitFolderRename,
+    onFolderRenameCancel: cancelFolderRename,
+    ruleFolderId,
+    onFolderRuleCommit: commitFolderRule,
+    onFolderRuleCancel: cancelFolderRule,
+    deletingFolderId,
+    onFolderDeleteConfirm: confirmFolderDelete,
+    onFolderDeleteCancel: cancelFolderDelete,
     onToggleArchiveGroup: handleToggleArchiveGroup,
     onArchiveGroupMenu: handleArchiveGroupMenu,
     onOpenOtherProject: handleOpenOtherProject,
