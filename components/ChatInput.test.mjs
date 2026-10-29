@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { createContext, Script } from "node:vm";
+import { Script } from "node:vm";
 import { createJiti } from "jiti";
 import ts from "typescript";
 
@@ -11,476 +11,13 @@ const jiti = createJiti(import.meta.url, {
 });
 const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
-const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canClearBuiltinCommandInput, canRestoreUserMessage, canRunBuiltinSlashCommandWhileStreaming, compressImageFile, cycleListIndex, filterModelOptions, getUpwardMenuMaxHeight, getUserMessageText, getUserMessageDraftImages, isExactSlashCommand, modelSupportsImageInput, offersBuiltinSlashCommandWhileStreaming, replaceLinksWithMarkdown, shouldCompressImageFile, submitsSlashCommandOnEnter } = await jiti.import("./ChatInput.tsx");
-const { isBareMcpCommand } = await jiti.import("@/lib/mcp-command.ts");
+const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, RUN_END_CLICK_GUARD_MS, canClearBuiltinCommandInput, canRestoreUserMessage, canRunBuiltinSlashCommandWhileStreaming, compressImageFile, cycleListIndex, filterModelOptions, getUpwardMenuMaxHeight, getUserMessageText, getUserMessageDraftImages, isExactSlashCommand, isRunEndStrayClick, modelSupportsImageInput, offersBuiltinSlashCommandWhileStreaming, replaceLinksWithMarkdown, replaceTextareaRange, shouldCompressImageFile, stacksComposerLayout, submitsSlashCommandOnEnter } = await jiti.import("./ChatInput.tsx");
+const { isBareMcpCommand } = await jiti.import("@/lib/mcp-command");
 const { ModelSelector } = await jiti.import("./ModelSelector.tsx");
-// ChatInput resolves "@/lib/draft-store" (extensionless). Import the SAME
-// module instance so setDraft/getDraft in this test touch the live draft Map;
-// the extensionless and ".ts" specifiers are separate jiti modules.
-const {
-  clearDraft,
-  getDraft,
-  mergeRestoredSubmissionDraft,
-  mergeRestoredSubmissionText,
-  rekeyDraft,
-  registerDraftRestoration,
-  restoreDraftSubmission,
-  setDraft,
-} = await jiti.import("@/lib/draft-store");
+// As ChatInput.tsx imports it: on Windows jiti loads "@/lib/draft-store.ts"
+// as a second copy, and ChatInput would never see the drafts set here (#1211).
+const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("@/lib/draft-store");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
-const { MAX_ATTACHED_IMAGES, MAX_ATTACHED_IMAGE_BYTES, isBase64ImageWithinLimits } = await jiti.import("@/lib/image-attachments");
-
-// Run the real imperative methods and React callbacks, with deferred functional
-// setters to exercise the synchronous-ref / queued-state recovery race.
-const composerSource = ts.createSourceFile("ChatInput.tsx", readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-const composerNodes = [];
-(function visit(node) { composerNodes.push(node); ts.forEachChild(node, visit); })(composerSource);
-function composerCode(name, context) {
-  context.isBareMcpCommand ??= isBareMcpCommand;
-  context.offersBuiltinSlashCommandWhileStreaming ??= offersBuiltinSlashCommandWhileStreaming;
-  context.maxImages ??= context.imageMode ? 4 : MAX_ATTACHED_IMAGES;
-  context.MAX_REFERENCE_IMAGES ??= 4;
-  context.mountedRef ??= { current: true };
-  context.sendPendingRef ??= { current: false };
-  context.streamingRef ??= { current: context.isStreaming ?? false };
-  context.draftOwnerRef ??= { current: {} };
-  context.draftOwner ??= context.draftOwnerRef.current;
-  context.imageModeRef ??= { current: context.imageMode ?? false };
-  context.valueRef ??= { current: context.value };
-  const node = composerNodes.find(node => (ts.isVariableDeclaration(node) || ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name?.getText(composerSource) === name);
-  assert.ok(node, name);
-  const text = ts.isMethodDeclaration(node)
-    ? `function ${node.getText(composerSource)}`
-    : ts.isVariableDeclaration(node) ? node.initializer.arguments[0].getText(composerSource) : node.getText(composerSource);
-  const expression = name === "handleSend" || name === "sendQueued"
-    ? `((value, attachedImages, draftOwner, imageMode, maxImages) => (${text}))(value, attachedImages, draftOwner, imageMode, maxImages)`
-    : `(${text})`;
-  return new Script(ts.transpileModule(expression, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText).runInContext(context);
-}
-function recoveredImage(n) { return { data: Buffer.from(`recovered-${n}`).toString("base64"), mimeType: "image/png" }; }
-function composerHarness(key, initial = { value: "", images: [] }) {
-  const updates = [];
-  const context = createContext({
-    MAX_ATTACHED_IMAGES, MAX_ATTACHED_IMAGE_BYTES, isBase64ImageWithinLimits,
-    getDraft, setDraft, clearDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText,
-    registerDraftRestoration, restoreDraftSubmission,
-    restorationCleanupRef: { current: null }, initialStoredDraftRef: { current: getDraft(key) },
-    rekeyStoredDraft: rekeyDraft, requestAnimationFrame() {}, revokeImagePreview() {},
-    draftKey: key, draftKeyRef: { current: key }, textareaRef: { current: null },
-    setAtQuery() {}, setHistoryMenuOpen() {},
-    setValue(update) { updates.push(() => { context.value = typeof update === "function" ? update(context.value) : update; }); },
-    setAttachedImages(update) { updates.push(() => { context.attachedImages = typeof update === "function" ? update(context.attachedImages) : update; }); },
-  });
-  for (const name of ["imageToDraftImage", "draftImageToAttachedImage", "draftImagesToAttachedImages"]) context[name] = composerCode(name, context);
-  context.value = initial.value;
-  context.attachedImages = context.draftImagesToAttachedImages(initial.images);
-  context.valueRef = { current: context.value };
-  context.attachedImagesRef = { current: context.attachedImages };
-  context.clearImages = composerCode("clearImages", context);
-  context.clearInput = composerCode("clearInput", context);
-  context.restoreSubmission = composerCode("restoreSubmission", context);
-  context.registerRestorationOwner = composerCode("registerRestorationOwner", context);
-  return {
-    context, restore: composerCode("restoreSubmission", context), rekey: composerCode("rekeyDraft", context), remove: composerCode("removeImage", context),
-    flush() { while (updates.length) updates.shift()(); },
-  };
-}
-function composerEffect(s, name) {
-  const node = composerNodes.find(node => ts.isCallExpression(node)
-    && ["useEffect", "useLayoutEffect"].includes(node.expression.getText(composerSource))
-    && (name === "persist" ? node.arguments[0]?.getText(composerSource).includes("if (!draftKey || draftKeyRef.current !== draftKey) return;")
-      : node.arguments[0]?.name?.getText(composerSource) === name));
-  assert.ok(node, name);
-  return new Script(ts.transpileModule(`(${node.arguments[0].getText(composerSource)})`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText).runInContext(s.context)();
-}
-
-for (const gap of [false, true]) test(`late offscreen recovery reaches remounted A once and survives pending effects/edit (registration gap=${gap})`, () => {
-  const a = `late-a-${gap}`, b = `late-b-${gap}`;
-  setDraft(a, { value: "newer", images: [recoveredImage(10)] });
-  const mounted = composerHarness(a, getDraft(a));
-  const other = composerHarness(b, { value: "B", images: [recoveredImage(20)] });
-  const cleanupB = composerEffect(other, "registerDraftRestorationEffect");
-  let cleanup;
-  try {
-    if (!gap) cleanup = composerEffect(mounted, "registerDraftRestorationEffect");
-    // Edits queued but not committed must be merged from the real live refs.
-    if (!gap) { mounted.context.valueRef.current = "newer unflushed"; mounted.context.setValue("newer unflushed"); }
-    const oldImages = Array.from({ length: 10 }, (_, n) => recoveredImage(n));
-    restoreDraftSubmission(a, "old response", oldImages);
-    if (gap) cleanup = composerEffect(mounted, "registerDraftRestorationEffect");
-    composerEffect(mounted, "persist"); // passive callback from pre-recovery render
-    const expected = `old response\n\n${gap ? "newer" : "newer unflushed"}`;
-    assert.equal(getDraft(a).value, expected);
-    mounted.flush(); other.flush();
-    assert.equal(mounted.context.value, expected);
-    assert.equal(mounted.context.attachedImages.length, 11);
-    assert.equal(other.context.value, "B");
-    assert.equal(other.context.attachedImages.length, 1);
-    mounted.context.valueRef.current += "!";
-    mounted.context.setValue(mounted.context.valueRef.current);
-    composerEffect(mounted, "persist"); mounted.flush();
-    assert.equal(getDraft(a).value, expected + "!");
-    assert.equal(getDraft(a).images.length, 11);
-    mounted.restore("direct", []); mounted.flush();
-    assert.equal(mounted.context.value, "direct\n\n" + expected + "!");
-  } finally { cleanup?.(); cleanupB(); clearDraft(a); clearDraft(b); }
-});
-
-test("restoration owner cleanup is identity safe, promotion moves registration before unchanged return", () => {
-  const a = "owner-a", real = "owner-real";
-  const stale = composerHarness(a), live = composerHarness(a);
-  const cleanStale = composerEffect(stale, "registerDraftRestorationEffect");
-  const cleanLive = composerEffect(live, "registerDraftRestorationEffect");
-  try {
-    cleanStale();
-    restoreDraftSubmission(a, "one"); live.flush(); stale.flush();
-    assert.equal(live.context.value, "one"); assert.equal(stale.context.value, "");
-    live.rekey(a, real);
-    restoreDraftSubmission(real, "two"); live.flush();
-    assert.equal(live.context.value, "two\n\none");
-    restoreDraftSubmission(a, "offscreen");
-    assert.equal(live.context.value, "two\n\none");
-    cleanLive();
-    restoreDraftSubmission(real, "after cleanup");
-    assert.equal(live.context.value, "two\n\none");
-    assert.equal(getDraft(real).value, "after cleanup\n\ntwo\n\none");
-  } finally { cleanStale(); cleanLive(); clearDraft(a); clearDraft(real); }
-});
-
-function composerMarkup(key, streaming = false) {
-  return renderToStaticMarkup(React.createElement(I18nProvider, null, React.createElement(ChatInput, {
-    draftKey: key, onSend() {}, onAbort() {}, onSteer() {}, onFollowUp() {}, isStreaming: streaming,
-  })));
-}
-
-test("imperative recovery retains old ten plus newer images before/after React flush, rekey and remount", () => {
-  const key = "recovery-callback", destination = "recovery-callback-promoted";
-  const old = Array.from({ length: 10 }, (_, n) => recoveredImage(n));
-  const newer = [recoveredImage(10), recoveredImage(10)];
-  const all = [...old, ...newer];
-  const s = composerHarness(key, { value: "newer", images: newer });
-  try {
-    s.restore("old", [...old, { data: "%%%", mimeType: "image/png" }]);
-    assert.deepEqual(JSON.parse(JSON.stringify(s.context.attachedImagesRef.current.map(({ data, mimeType }) => ({ data, mimeType })))), all);
-    assert.deepEqual(getDraft(key), { value: "old\n\nnewer", images: all });
-    s.rekey(key, destination); // promotion before React commits its setters
-    assert.equal(getDraft(key), null);
-    assert.deepEqual(JSON.parse(JSON.stringify(getDraft(destination).images)), all);
-    s.flush();
-    assert.equal(s.context.attachedImages.length, 12);
-    assert.equal(s.context.value, "old\n\nnewer");
-    const mounted = composerHarness(destination, getDraft(destination));
-    assert.equal(mounted.context.attachedImages.length, 12);
-    for (const streaming of [false, true]) {
-      const html = composerMarkup(destination, streaming);
-      assert.equal((html.match(/<img /g) ?? []).length, 12, "actual fresh React render hydrates every preview");
-      assert.match(html, /role="alert"/);
-      const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
-      for (const label of streaming ? ["Steer", "Follow-up"] : ["Send"]) {
-        const button = buttons.find(button => button.includes(`>${label}</button>`));
-        assert.ok(button, label);
-        assert.match(button, /disabled=""/);
-      }
-    }
-    mounted.remove(0); mounted.flush(); mounted.remove(0); mounted.flush();
-    setDraft(destination, { value: mounted.context.value, images: mounted.context.attachedImages.map(mounted.context.imageToDraftImage) });
-    assert.equal(getDraft(destination).images.length, 10);
-    const sent = [];
-    Object.assign(mounted.context, {
-      imageMode: false, isStreaming: true, onAudioUnlock() {}, onBuiltinCommand: undefined,
-      onPromptWithStreamingBehavior: undefined, onSteer: (text, images) => sent.push({ text, images }),
-    });
-    composerCode("sendQueued", mounted.context)("steer");
-    assert.equal(sent.length, 1, "removal restores actual queue callback admission");
-    assert.equal(sent[0].images.length, 10);
-    // Restore the persisted snapshot cleared by the successful queue callback.
-    setDraft(destination, { value: "old\n\nnewer", images: all.slice(2) });
-    assert.doesNotMatch(composerMarkup(destination), /role="alert"/);
-    for (const streaming of [false, true]) {
-      const html = composerMarkup(destination, streaming);
-      const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
-      for (const label of streaming ? ["Steer", "Follow-up"] : ["Send"]) assert.doesNotMatch(buttons.find(button => button.includes(`>${label}</button>`)), /disabled=""/);
-    }
-  } finally { clearDraft(key); clearDraft(destination); }
-});
-
-test("queued clear then recovery preserves all recoverable images instead of old state", () => {
-  const key = "recovery-clear-race";
-  const images = Array.from({ length: 11 }, (_, n) => recoveredImage(n));
-  const s = composerHarness(key, { value: "original", images });
-  try {
-    s.context.clearInput();
-    s.restore("original", images);
-    assert.equal(s.context.attachedImagesRef.current.length, 11);
-    s.flush();
-    assert.equal(s.context.attachedImages.length, 11);
-    assert.equal(s.context.value, "original");
-    assert.deepEqual(getDraft(key).images, images);
-  } finally { clearDraft(key); }
-});
-
-test("actual send and queue callbacks block every path before callbacks or clear while over cap", async () => {
-  for (const snapshotOnly of [false, true]) {
-    for (const [name, imageMode, streaming, value, mode] of [
-      ["handleSend", false, false, "normal"], ["handleSend", true, false, "draw"],
-      ["handleSend", false, true, "/copy"],
-      ["sendQueued", false, true, "normal", "steer"], ["sendQueued", false, true, "normal", "followup"],
-      ["sendQueued", false, true, "/skill:review", "steer"], ["sendQueued", false, true, "/skill:review", "followup"],
-      ["sendQueued", false, true, "/copy", "followup"],
-    ]) {
-      const calls = [];
-      const images = Array.from({ length: 11 }, (_, n) => recoveredImage(n));
-      const context = createContext({
-        MAX_ATTACHED_IMAGES, attachedImages: snapshotOnly ? [] : images, attachedImagesRef: { current: images },
-        value, imageMode, isStreaming: streaming, isGeneratingImage: false, activeImageModel: {}, imageAspectRatio: "auto", imageCount: 1, imageSeed: null,
-        canRunBuiltinSlashCommandWhileStreaming,
-      });
-      for (const callback of ["clearInput", "onSend", "onImageGenerate", "onSteer", "onFollowUp", "onPromptWithStreamingBehavior", "onAudioUnlock", "runBuiltinCommand", "onBuiltinCommand"]) context[callback] = () => calls.push(callback);
-      await composerCode(name, context)(mode);
-      assert.deepEqual(calls, [], `${name} ${value} ${mode} snapshotOnly=${snapshotOnly}`);
-    }
-  }
-});
-
-for (const mode of ["steer", "followup"]) {
-  function queueHarness(s, calls) {
-    Object.assign(s.context, {
-      imageMode: false, isStreaming: true, canRunBuiltinSlashCommandWhileStreaming,
-      onBuiltinCommand: undefined, onPromptWithStreamingBehavior: undefined,
-      onSteer: (text, images) => calls.push(["steer", text, images]),
-      onFollowUp: (text, images) => calls.push(["followup", text, images]),
-      onAudioUnlock() {},
-    });
-    return composerCode("sendQueued", s.context);
-  }
-
-  test(`${mode}: retained queue cannot erase real recovery before React flush`, async () => {
-    const key = `queue-restore-${mode}`;
-    const s = composerHarness(key, { value: "newer", images: [] });
-    const calls = [];
-    const queue = queueHarness(s, calls);
-    try {
-      s.restore("recovered", [recoveredImage(0)]);
-      await queue(mode);
-      assert.deepEqual(calls, []);
-      assert.deepEqual(getDraft(key), { value: "recovered\n\nnewer", images: [recoveredImage(0)] });
-      s.flush();
-      assert.equal(s.context.value, "recovered\n\nnewer");
-      assert.equal(s.context.attachedImages.length, 1);
-      await composerCode("sendQueued", s.context)(mode);
-      assert.equal(calls.length, 1, "live render submits the recovered payload");
-      assert.equal(calls[0][1], "recovered\n\nnewer");
-      assert.equal(calls[0][2].length, 1);
-      s.flush();
-      assert.equal(s.context.value, "");
-      assert.equal(getDraft(key), null);
-    } finally { clearDraft(key); }
-  });
-
-  test(`${mode}: stale ownership and audio mutations preserve the draft`, async () => {
-    for (const change of ["mode", "image-render", "unmount", "navigate", "rekey", "restore", "text", "mutate", "replace", "append"]) {
-      const key = `queue-ownership-${mode}-${change}`, next = `${key}-next`;
-      const s = composerHarness(key, { value: "newer", images: [recoveredImage(0)] });
-      const calls = [];
-      try {
-        const queue = queueHarness(s, calls);
-        const mutate = () => {
-          if (change === "mode") s.context.imageModeRef.current = true;
-          if (change === "unmount") s.context.mountedRef.current = false;
-          if (change === "navigate") s.context.draftOwnerRef.current = {};
-          if (change === "rekey") { setDraft(next, { value: "destination", images: [] }); s.rekey(key, next); }
-          if (change === "restore") s.restore("recovered", [recoveredImage(1)]);
-          if (change === "text") s.context.valueRef.current = "changed";
-          if (change === "mutate") s.context.attachedImagesRef.current[0].data = recoveredImage(2).data;
-          if (change === "replace") s.context.attachedImagesRef.current = [...s.context.attachedImages];
-          if (change === "append") s.context.attachedImagesRef.current.push(recoveredImage(3));
-        };
-        if (change === "image-render") {
-          s.context.imageMode = true; s.context.imageModeRef.current = true;
-          const imageQueue = composerCode("sendQueued", s.context);
-          s.context.imageModeRef.current = false;
-          await imageQueue(mode);
-        } else {
-          if (["mode", "unmount", "navigate", "rekey"].includes(change)) mutate();
-          else s.context.onAudioUnlock = mutate;
-          await queue(mode);
-        }
-        assert.deepEqual(calls, [], change);
-        s.flush();
-        assert.notEqual(s.context.value, "", change);
-        assert.equal(s.context.sendPendingRef.current, false);
-      } finally { clearDraft(key); clearDraft(next); }
-    }
-  });
-
-  test(`${mode}: audio reentry shares Send's guard and absent callbacks never clear`, async () => {
-    const s = composerHarness(`queue-reentry-${mode}`, { value: "hello", images: [] });
-    const calls = [];
-    const queue = queueHarness(s, calls);
-    Object.assign(s.context, { runBuiltinCommand: async () => false, onSend: () => calls.push("send") });
-    const send = composerCode("handleSend", s.context);
-    s.context.onAudioUnlock = () => { void queue(mode); void send(); };
-    await queue(mode);
-    assert.equal(calls.length, 1);
-    s.flush();
-    assert.equal(s.context.value, "");
-    const missing = composerHarness(`queue-missing-${mode}`, { value: "keep", images: [] });
-    const missingCalls = [];
-    const missingQueue = queueHarness(missing, missingCalls);
-    missing.context[mode === "steer" ? "onSteer" : "onFollowUp"] = undefined;
-    await missingQueue(mode);
-    missing.flush();
-    assert.equal(missing.context.value, "keep");
-    assert.deepEqual(missingCalls, []);
-  });
-
-  test(`${mode}: queue preserves slash behavior and holds shared guard for read-only builtins`, async () => {
-    for (const value of ["/skill:review", "/copy"]) {
-      const s = composerHarness(`queue-slash-${mode}`, { value, images: [] });
-      const calls = [];
-      const queue = queueHarness(s, calls);
-      let finish;
-      Object.assign(s.context, {
-        onBuiltinCommand: () => {},
-        onPromptWithStreamingBehavior: (...args) => calls.push(args),
-        runBuiltinCommand: () => new Promise(resolve => { calls.push("builtin"); finish = resolve; }),
-      });
-      const pending = queue(mode);
-      if (value === "/copy") {
-        assert.equal(s.context.sendPendingRef.current, true);
-        await queue(mode);
-        assert.deepEqual(calls, ["builtin"]);
-        finish(true);
-      } else {
-        assert.deepEqual(calls, [[value, mode === "steer" ? "steer" : "followUp", undefined]]);
-      }
-      await pending;
-      assert.equal(s.context.sendPendingRef.current, false);
-    }
-  });
-}
-
-test("send rechecks recovered snapshot after awaiting built-in dispatch", async () => {
-  const calls = [];
-  const ref = { current: [] };
-  const context = createContext({
-    MAX_ATTACHED_IMAGES, attachedImages: [], attachedImagesRef: ref, value: "draft", imageMode: false, isStreaming: false,
-    onAudioUnlock() {}, canRunBuiltinSlashCommandWhileStreaming,
-    runBuiltinCommand: async () => { ref.current = Array.from({ length: 11 }, (_, n) => recoveredImage(n)); return false; },
-    clearInput: () => calls.push("clear"), onSend: () => calls.push("send"),
-  });
-  await composerCode("handleSend", context)();
-  assert.deepEqual(calls, []);
-});
-
-test("lexical send attempt never clears or dispatches a changed draft while awaiting", async () => {
-  for (const change of ["restore", "text", "remove", "replace", "mutate", "unmount", "navigate", "mode", "streaming"]) {
-    const key = `send-ownership-${change}`;
-    const s = composerHarness(key, { value: "/unknown", images: [recoveredImage(0)] });
-    const calls = [];
-    let resolve;
-    Object.assign(s.context, {
-      imageMode: false, isStreaming: false, onAudioUnlock() {}, canRunBuiltinSlashCommandWhileStreaming,
-      runBuiltinCommand: () => new Promise(done => { resolve = done; }),
-      onSend: (...args) => calls.push(args),
-    });
-    const send = composerCode("handleSend", s.context);
-    const first = send();
-    if (change === "restore") s.restore("recovered", [recoveredImage(1)]);
-    if (change === "text") s.context.valueRef.current = "edited";
-    if (change === "remove") { s.remove(0); s.flush(); }
-    if (change === "replace") s.context.attachedImagesRef.current = [{ ...s.context.attachedImages[0] }];
-    if (change === "mutate") s.context.attachedImagesRef.current[0].data = recoveredImage(2).data;
-    if (change === "unmount") s.context.mountedRef.current = false;
-    if (change === "navigate") s.context.draftOwnerRef.current = {};
-    if (change === "mode") s.context.imageModeRef.current = true;
-    if (change === "streaming") s.context.streamingRef.current = true;
-    const textBefore = s.context.valueRef.current;
-    const imagesBefore = s.context.attachedImagesRef.current;
-    resolve(false);
-    await first;
-    assert.equal(calls.length, 0, change);
-    assert.equal(s.context.valueRef.current, textBefore, change);
-    assert.equal(s.context.attachedImagesRef.current, imagesBefore, change);
-    assert.equal(s.context.sendPendingRef.current, false);
-    clearDraft(key);
-  }
-});
-
-test("send rejects stale render at entry and same-stack reentry; unchanged promotion sends once", async () => {
-  const key = "send-promotion", promoted = `${key}-session`;
-  const s = composerHarness(key, { value: "hello", images: [] });
-  let resolve;
-  const calls = [];
-  let builtinCalls = 0;
-  Object.assign(s.context, {
-    imageMode: false, isStreaming: false, onAudioUnlock() {}, canRunBuiltinSlashCommandWhileStreaming,
-    runBuiltinCommand: () => { builtinCalls++; return new Promise(done => { resolve = done; }); },
-    onSend: (...args) => calls.push(args),
-  });
-  const send = composerCode("handleSend", s.context);
-  s.context.valueRef.current = "newer";
-  await send();
-  assert.equal(builtinCalls, 0);
-  assert.equal(s.context.valueRef.current, "newer");
-  s.context.valueRef.current = "hello";
-  const first = send();
-  await send();
-  assert.equal(builtinCalls, 1);
-  s.rekey(key, promoted);
-  resolve(false);
-  await first;
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0][0], "hello");
-  assert.equal(s.context.valueRef.current, "");
-  assert.equal(getDraft(promoted), null);
-  clearDraft(key); clearDraft(promoted);
-});
-
-test("actual send admits ten chat images, four image references, and blocks five references without truncation", async () => {
-  for (const [imageMode, count, expected] of [[false, 10, 1], [true, 4, 1], [true, 5, 0], [true, 10, 0]]) {
-    const s = composerHarness("mode-cap", { value: "prompt", images: Array.from({ length: count }, (_, n) => recoveredImage(n)) });
-    const calls = [];
-    Object.assign(s.context, {
-      imageMode, imageModeRef: { current: imageMode }, maxImages: imageMode ? 4 : 10,
-      isStreaming: false, isGeneratingImage: false, activeImageModel: {}, imageAspectRatio: "auto", imageCount: 1, imageSeed: null,
-      onAudioUnlock() {}, canRunBuiltinSlashCommandWhileStreaming, runBuiltinCommand: async () => false,
-      onSend: (...args) => calls.push(args), onImageGenerate: (...args) => calls.push(args),
-    });
-    await composerCode("handleSend", s.context)();
-    assert.equal(calls.length, expected, `${imageMode}/${count}`);
-    if (expected) assert.equal(calls[0][1].length, count);
-    else {
-      assert.equal(s.context.attachedImagesRef.current.length, count);
-      assert.equal(s.context.valueRef.current, "prompt");
-      // Switching back to chat admits the exact same draft, without slicing it.
-      s.context.imageMode = false; s.context.imageModeRef.current = false; s.context.maxImages = 10;
-      await composerCode("handleSend", s.context)();
-      assert.equal(calls[0][1].length, count);
-    }
-  }
-});
-
-test("hydration filters invalid individual images without capping valid recovery", () => {
-  const images = Array.from({ length: 11 }, (_, n) => recoveredImage(n));
-  const s = composerHarness("validity", { value: "", images: [
-    { data: "%%%", mimeType: "image/png" }, ...images,
-    { data: "AQID", mimeType: "text/plain" },
-    { data: "AAAA".repeat(Math.ceil((MAX_ATTACHED_IMAGE_BYTES + 1) / 3)), mimeType: "image/png" },
-  ] });
-  assert.equal(s.context.attachedImages.length, 11);
-  assert.deepEqual(JSON.parse(JSON.stringify(s.context.attachedImages.map(s.context.imageToDraftImage))), images);
-});
-
-test("normal file attachment capacity still rejects additions to full and recovered drafts", async () => {
-  for (const count of [10, 11]) {
-    const s = composerHarness("upload-cap", { value: "", images: Array.from({ length: count }, (_, n) => recoveredImage(n)) });
-    Object.assign(s.context, { compact: false, pendingImageCountRef: { current: 0 }, compressImageFile() { assert.fail("must not process over-cap uploads"); } });
-    await composerCode("processImageFiles", s.context)([{ type: "image/png", size: 3 }]);
-    s.flush();
-    assert.equal(s.context.attachedImages.length, count);
-  }
-});
 
 test("preserves pasted HTML links as Markdown without changing plain text layout", () => {
   const link = (label, href, occurrence = 0) => ({ label, href, occurrence });
@@ -501,6 +38,19 @@ test("preserves pasted HTML links as Markdown without changing plain text layout
     "Engineer and [Engineer](https://example.com/job)",
   );
   assert.equal(replaceLinksWithMarkdown("plain text", [link("missing", "https://example.com")]), null);
+});
+
+test("a phone stacks the streaming buttons under the draft instead of beside it", () => {
+  // Two buttons in the draft's row leave the placeholder about 150px on a 360px
+  // phone. Only a streaming run has those buttons; idle keeps the icon-only send
+  // button in the row, and a desktop has width for the row either way.
+  assert.equal(stacksComposerLayout(false, false, false), false);
+  assert.equal(stacksComposerLayout(false, false, true), false);
+  assert.equal(stacksComposerLayout(false, true, false), false);
+  assert.equal(stacksComposerLayout(false, true, true), true);
+  // Quote mode always stacks: it is a short excerpt, whichever platform shows it.
+  assert.equal(stacksComposerLayout(true, false, false), true);
+  assert.equal(stacksComposerLayout(true, true, false), true);
 });
 
 test("follow-up shortcuts preserve newline, IME, mobile and completion behavior", () => {
@@ -553,7 +103,7 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
     const handler = script.runInNewContext({
       Date: { now: () => 1000 },
       COMPOSITION_END_ENTER_GRACE_MS: 100,
-      imageMode: false, isMobile: false, isStreaming: true, enterSendMode: "enter",
+      isMobile: false, isStreaming: true, enterSendMode: "enter",
       isComposingRef: { current: false }, lastCompositionEndAtRef: { current: 0 },
       historyMenuOpen: false, inputHistory: ["previous"], historyActiveIndex: 0,
       slashMenuOpen: false, slashQuery: null, displayedSlashCommands: [{}], slashActiveIndex: 0,
@@ -573,6 +123,98 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
       ...keys,
     });
     assert.equal(action, expected, name);
+  }
+});
+
+test("file mention insertion uses one native undoable edit", () => {
+  const originalDocument = globalThis.document;
+  const calls = [];
+  const textarea = {
+    value: '@"my/"',
+    selectionStart: 5,
+    selectionEnd: 5,
+    focus() { calls.push(["focus"]); },
+    setSelectionRange(start, end) {
+      this.selectionStart = start;
+      this.selectionEnd = end;
+      calls.push(["selection", start, end]);
+    },
+  };
+  globalThis.document = {
+    execCommand(command, _showUi, text = "") {
+      calls.push(["command", command, text]);
+      if (command === "delete") {
+        textarea.value = textarea.value.slice(0, --textarea.selectionStart) + textarea.value.slice(textarea.selectionEnd);
+        textarea.selectionEnd = textarea.selectionStart;
+      } else if (command === "insertText") {
+        textarea.value = textarea.value.slice(0, textarea.selectionStart) + text + textarea.value.slice(textarea.selectionEnd);
+        textarea.selectionStart += text.length;
+        textarea.selectionEnd = textarea.selectionStart;
+      } else if (command === "forwardDelete") {
+        textarea.value = textarea.value.slice(0, textarea.selectionStart) + textarea.value.slice(textarea.selectionStart + 1);
+      }
+      return true;
+    },
+  };
+
+  try {
+    replaceTextareaRange(textarea, 0, 6, '@"my dir/"', 9);
+    assert.equal(textarea.value, '@"my dir/"');
+    assert.deepEqual(calls, [
+      ["focus"],
+      ...Array.from({ length: 5 }, () => ["command", "delete", ""]),
+      ["command", "insertText", '@"my dir/"'],
+      ["command", "forwardDelete", ""],
+      ["selection", 9, 9],
+    ]);
+
+    calls.length = 0;
+    Object.assign(textarea, { value: "hello selected", selectionStart: 6, selectionEnd: 14 });
+    replaceTextareaRange(textarea, 6, 14, "@file ");
+    assert.equal(textarea.value, "hello @file ");
+    assert.deepEqual(calls, [
+      ["focus"],
+      ["selection", 6, 14],
+      ["command", "insertText", "@file "],
+    ]);
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
+test("file mention insertion falls back to a plain edit when execCommand refuses", () => {
+  const originalDocument = globalThis.document;
+  const events = [];
+  const textarea = {
+    value: "AAA @re BBB",
+    selectionStart: 7,
+    selectionEnd: 7,
+    focus() {},
+    setSelectionRange(start, end) {
+      this.selectionStart = start;
+      this.selectionEnd = end;
+    },
+    setRangeText(text, start, end, mode) {
+      this.value = this.value.slice(0, start) + text + this.value.slice(end);
+      if (mode === "end") this.selectionStart = this.selectionEnd = start + text.length;
+    },
+    dispatchEvent(event) { events.push([event.type, event.bubbles]); return true; },
+  };
+  globalThis.document = { execCommand: () => false };
+
+  try {
+    replaceTextareaRange(textarea, 4, 7, "@readme.md ");
+    assert.equal(textarea.value, "AAA @readme.md  BBB");
+    assert.equal(textarea.selectionStart, 15);
+    assert.deepEqual(events, [["input", true]]);
+
+    events.length = 0;
+    Object.assign(textarea, { value: "hello selected", selectionStart: 6, selectionEnd: 14 });
+    replaceTextareaRange(textarea, 6, 14, "@file ");
+    assert.equal(textarea.value, "hello @file ");
+    assert.deepEqual(events, [["input", true]]);
+  } finally {
+    globalThis.document = originalDocument;
   }
 });
 
@@ -645,6 +287,15 @@ test("shows the follow-up shortcut in the button tooltip", () => {
 
   assert.match(html, /title="Queue this message after the agent finishes \(Alt\/Option\+Enter\)"/);
   assert.match(html, /aria-keyshortcuts="Alt\+Enter"/);
+});
+
+test("ignores a pointer click that reaches Stop's slot just as the run ends", () => {
+  assert.equal(isRunEndStrayClick(1, 0), true);
+  assert.equal(isRunEndStrayClick(2, RUN_END_CLICK_GUARD_MS - 1), true);
+  assert.equal(isRunEndStrayClick(1, RUN_END_CLICK_GUARD_MS), false);
+  assert.equal(isRunEndStrayClick(1, Number.POSITIVE_INFINITY), false, "no run has ended yet");
+  assert.equal(isRunEndStrayClick(0, 0), false, "Enter/Space on a focused button is never a stray click");
+  assert.ok(RUN_END_CLICK_GUARD_MS <= 700, "a deliberate click after a run must not wait noticeably");
 });
 
 test("renders the upstream model error", () => {
@@ -769,7 +420,44 @@ test("renders the compact composer with the standard Send button and no session 
   assert.match(html, /<textarea/);
   assert.match(html, />Send<\/button>/);
   assert.equal((html.match(/<button\b/g) ?? []).length, 1);
-  assert.doesNotMatch(html, /type="file"|Attach image|Change tool preset/);
+  assert.doesNotMatch(html, /type="file"|Attach files|Change tool preset/);
+});
+
+test("the attach button takes any file when the chat handles them, and images only otherwise (#1101)", () => {
+  const render = (props) => renderToStaticMarkup(
+    React.createElement(I18nProvider, null, React.createElement(ChatInput, {
+      onSend() {}, onAbort() {}, isStreaming: false, ...props,
+    })),
+  );
+  const fileInput = (html) => html.match(/<input[^>]*type="file"[^>]*>/)?.[0] ?? "";
+
+  const html = render({ onAttachFiles() {} });
+  assert.match(html, /title="Attach files"/);
+  assert.match(fileInput(html), /multiple=""/);
+  // No accept list and no capture: phones offer files, the photo library and the camera.
+  assert.doesNotMatch(fileInput(html), /accept=|capture=/);
+
+  assert.match(fileInput(render({})), /accept="image\/\*"/);
+});
+
+test("picked files go to the chat's attach handler, or attach as images without one (#1101)", () => {
+  const photo = new File(["x"], "photo.png", { type: "image/png" });
+  const report = new File(["x"], "report.pdf", { type: "application/pdf" });
+  const pick = (context) => {
+    const calls = { attached: [], images: [] };
+    const target = { files: [photo, report], value: "C:\\fakepath\\photo.png" };
+    chatInputCallback("handleFilePick", {
+      processImageFiles: (files) => calls.images.push([...files]),
+      ...context(calls),
+    })({ target });
+    return { ...calls, value: target.value };
+  };
+
+  assert.deepEqual(
+    pick((calls) => ({ onAttachFiles: (files) => calls.attached.push([...files]) })),
+    { attached: [[photo, report]], images: [], value: "" },
+  );
+  assert.deepEqual(pick(() => ({ onAttachFiles: undefined })), { attached: [], images: [[photo, report]], value: "" });
 });
 
 test("shows and locks the optimistic model while a switch is pending", () => {
@@ -796,29 +484,50 @@ test("shows and locks the optimistic model while a switch is pending", () => {
   assert.match(html, /animation:spin 0\.8s linear infinite/);
 });
 
-test("thinking selection is unavailable until model switching and its reload finish", () => {
-  const render = (modelSwitching) => renderToStaticMarkup(React.createElement(I18nProvider, null,
-    React.createElement(ChatInput, {
-      onSend() {}, onAbort() {}, onThinkingLevelChange() {},
-      isStreaming: false, modelSwitching, thinkingLevel: "high",
-    })));
-  const idle = render(false);
-  const busy = render(true);
-  assert.match(idle, /aria-label="Change reasoning level"/);
-  assert.doesNotMatch(busy, /aria-label="Change reasoning level"/);
+test("the live model selector can reapply its current model without changing draft-field selection behavior", () => {
+  const source = ts.createSourceFile("ModelSelector.tsx", readFileSync(new URL("./ModelSelector.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  function findChoose(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "choose") return node.initializer;
+    return ts.forEachChild(node, findChoose);
+  }
+  const script = new Script(ts.transpileModule(findChoose(source).getText(source), {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+  const option = { provider: "fixture", modelId: "same-id", name: "Fixture" };
+  for (const [active, automatic, live, expected] of [
+    [true, false, true, "reselect"],
+    [true, false, false, null],
+    [true, true, true, "change"],
+    [false, false, true, "change"],
+  ]) {
+    const calls = [];
+    const choose = script.runInNewContext({
+      value: active ? option : null, isAutoSelection: automatic,
+      setOpen: (value) => calls.push(["open", value]),
+      setFilter: (value) => calls.push(["filter", value]),
+      onChange: (provider, id) => calls.push(["change", provider, id]),
+      onReselect: live ? (provider, id) => calls.push(["reselect", provider, id]) : undefined,
+    });
+    choose(option);
+    assert.deepEqual(calls, [["open", false], ["filter", ""], ...(expected ? [[expected, option.provider, option.modelId]] : [])]);
+  }
+  assert.match(readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8"), /onReselect=\{onModelChange\}/);
 });
 
-test("filters model options by name and id", () => {
+test("filters model options by name, id, provider and provider/id", () => {
   const options = [
     { provider: "ollama", modelId: "qwen3:latest", name: "Qwen 3" },
     { provider: "anthropic", modelId: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
     { provider: "openai", modelId: "gpt-5.4", name: "GPT-5.4" },
+    { provider: "relay-a", modelId: "gpt-5.4", name: "GPT-5.4" },
   ];
 
   assert.deepEqual(filterModelOptions(options, "QWEN"), [options[0]]);
   assert.deepEqual(filterModelOptions(options, "claude-sonnet"), [options[1]]);
-  assert.equal(filterModelOptions(options, "OpenAI").length, 0);
-  assert.equal(filterModelOptions(options, "anthropic/claude").length, 0);
+  assert.deepEqual(filterModelOptions(options, "OpenAI"), [options[2]]);
+  assert.deepEqual(filterModelOptions(options, " anthropic/claude "), [options[1]]);
+  assert.deepEqual(filterModelOptions(options, "Relay-A/GPT"), [options[3]]);
+  assert.deepEqual(filterModelOptions(options, "gpt-5.4"), [options[2], options[3]]);
   assert.equal(filterModelOptions(options, "missing").length, 0);
   assert.equal(filterModelOptions(options, "  "), options);
 });
@@ -854,27 +563,6 @@ test("caps an upward menu to the visible space above its anchor", () => {
   // file list would paint through the bar and hide the leading matches.
   assert.equal(getUpwardMenuMaxHeight(200, 36), 156);
   assert.ok(getUpwardMenuMaxHeight(200, 36) < 400);
-});
-
-test("file mention menu applies the measured upward height cap", () => {
-  const source = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
-  const start = source.indexOf("{atMenuOpen && atQuery !== null && (() => {");
-  assert.notEqual(start, -1);
-  const block = source.slice(start, start + 4000);
-  assert.match(block, /ref=\{atMenuRef\}/);
-  assert.match(block, /min\(48vh, 400px, \$\{atMenuMaxHeight\}px\)/);
-  assert.match(block, /flexDirection: "column"/);
-  assert.match(block, /minHeight: 0/);
-  assert.equal(block.includes("maxHeight: \"min(48vh, 400px)\""), false);
-});
-
-test("file mention menu remeasures when its layout container shifts the anchor", () => {
-  const source = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
-  const start = source.indexOf("function subscribeUpwardMenuMaxHeight");
-  assert.notEqual(start, -1);
-  const block = source.slice(start, start + 1800);
-  assert.match(block, /const layoutContainer = parent\?\.parentElement;/);
-  assert.match(block, /anchorObserver\?\.observe\(layoutContainer\)/);
 });
 
 test("compresses large images while preserving small images and GIFs", async () => {
@@ -958,7 +646,6 @@ test("locks built-in command submission until it settles", async () => {
     attachedImages: [],
     attachedImagesRef: { current: [] },
     builtinCommandPendingRef: { current: false },
-    mountedRef: { current: true }, draftOwnerRef: { current: {} },
     canClearBuiltinCommandInput,
     clearInput() {},
     onBuiltinCommand: async () => new Promise((resolve) => { callback.resolve = resolve; }),
@@ -974,7 +661,6 @@ test("locks built-in command submission until it settles", async () => {
   callback.resolve({ handled: true });
   assert.equal(await first, true);
   assert.deepEqual(callback.pendingStates, [true, false]);
-  assert.match(sourceText, /<fieldset\s+disabled=\{builtinCommandPending\}\s+aria-busy=\{builtinCommandPending\}/);
 });
 
 test("keeps only read-only built-ins available while a run is active", () => {
@@ -1012,16 +698,9 @@ test("Enter on pi's built-in /mcp submits it at once; other extension commands s
   assert.equal(submitsSlashCommandOnEnter("/compact", compact, false), true);
   assert.equal(submitsSlashCommandOnEnter("/compact", compact, true), false);
   assert.equal(submitsSlashCommandOnEnter("/co", copy, false), false);
-
-  const sourceText = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
-  assert.match(sourceText, /if \(sendShortcut && submitsSlashCommandOnEnter\(value, selectedCommand, isStreaming\)\) \{/);
 });
 
 function chatInputCallback(name, context) {
-  context.imageMode ??= false;
-  context.attachedImagesRef ??= { current: context.attachedImages };
-  context.MAX_ATTACHED_IMAGES ??= MAX_ATTACHED_IMAGES;
-  if (name === "handleSend" || name === "sendQueued") return composerCode(name, createContext(context));
   const sourceText = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
   const source = ts.createSourceFile("ChatInput.tsx", sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   function findCallback(node) {
@@ -1066,27 +745,6 @@ test("while a run streams, a bare /mcp opens Settings or is queued as before", a
   assert.deepEqual(await run("/mcp", true, { images: [{}] }), { builtin: [], prompts: [["/mcp", "steer", 1]], cleared: 1 });
   // The composer's own built-ins are unchanged.
   assert.deepEqual(await run("/copy", true), { builtin: ["/copy"], prompts: [], cleared: 0 });
-});
-
-test("an async unowned /mcp lookup cannot queue a recovered replacement draft", async () => {
-  const s = composerHarness("mcp-queue-recovery", { value: "/mcp", images: [] });
-  let resolve;
-  const calls = [];
-  Object.assign(s.context, {
-    imageMode: false, onAudioUnlock() {}, onBuiltinCommand() {},
-    canRunBuiltinSlashCommandWhileStreaming,
-    runBuiltinCommand: () => new Promise(done => { resolve = done; }),
-    onPromptWithStreamingBehavior: (...args) => calls.push(args),
-  });
-  try {
-    const pending = composerCode("sendQueued", s.context)("steer");
-    s.restore("recovered", []);
-    resolve(false);
-    await pending;
-    assert.deepEqual(calls, []);
-    assert.equal(s.context.valueRef.current, "recovered\n\n/mcp");
-    assert.equal(s.context.sendPendingRef.current, false);
-  } finally { clearDraft("mcp-queue-recovery"); }
 });
 
 test("handleSend lets a handled /mcp through while streaming and sends an unowned one when idle", async () => {
@@ -1259,6 +917,26 @@ test("renders compact errors above the input as a wrapping alert", () => {
   assert.ok(html.indexOf('role="alert"') < html.indexOf("<textarea"));
 });
 
+test("a compact error can be dismissed when the composer is given a handler", () => {
+  const render = (props) => renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(ChatInput, {
+        onSend() {},
+        onAbort() {},
+        onCompact() {},
+        isStreaming: false,
+        compactError: "Nothing to compact (session too small)",
+        ...props,
+      }),
+    ),
+  );
+
+  assert.match(render({ onDismissCompactError() {} }), /aria-label="Dismiss compaction error"/);
+  assert.doesNotMatch(render({}), /Dismiss compaction error/);
+});
+
 test("modelSupportsImageInput warns only when modality info is known and lacks image", () => {
   const modelList = [
     { id: "text-only", name: "Text Only", provider: "ollama", input: ["text"] },
@@ -1316,16 +994,6 @@ test("renders image warnings for known text-only defaults without an explicit mo
   } finally {
     clearDraft(draftKey);
   }
-});
-
-test("only the chat composer offers saving a default model or reasoning level", () => {
-  const chatInputSource = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
-  const agentsConfigSource = readFileSync(new URL("./AgentsConfig.tsx", import.meta.url), "utf8");
-  assert.match(chatInputSource, /<ModelSelector[\s\S]*?defaultValue=\{defaultModel\}[\s\S]*?onSetDefault=\{onSetDefaultModel\}/);
-  // "auto" means "use the default", so it never gets a star of its own.
-  assert.match(chatInputSource, /star=\{onSetDefaultThinkingLevel && lvl !== "auto"/);
-  // A subagent profile's model is not the default for new chats.
-  assert.doesNotMatch(agentsConfigSource, /onSetDefault/);
 });
 
 test("selector rows keep the default star and the floating save button in one gutter", async () => {

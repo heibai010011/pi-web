@@ -1,6 +1,7 @@
+import { existsSync } from "fs";
 import { stat } from "fs/promises";
 import { resolve } from "path";
-import { createAgentSessionServices, getAgentDir, ModelRegistry, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionServices, getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import {
   loadModelsWithCache,
@@ -8,23 +9,13 @@ import {
   withSafeModelLoadFailure,
   type ModelsData,
 } from "@/lib/models-cache";
-import { getImagesModels, imageCredentialsFromModelRegistry, listImageModels } from "@/lib/image-gen";
-import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
+import { orderSelectorModels, resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
+import { rememberProviderModels, withDeferredProviderModels } from "@/lib/deferred-provider-models";
+import { inferRemovedWorktree } from "@/lib/worktree";
 
 export const dynamic = "force-dynamic";
-
-const modelNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-
-function compareModelEntries(
-  a: { id: string; name: string; provider: string },
-  b: { id: string; name: string; provider: string }
-): number {
-  return modelNameCollator.compare(a.name || a.id, b.name || b.id)
-    || modelNameCollator.compare(a.provider, b.provider)
-    || modelNameCollator.compare(a.id, b.id);
-}
 
 async function loadModels(cwd: string): Promise<ModelsData> {
   const nameMap = new Map<string, string>();
@@ -45,19 +36,20 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   });
   const modelError = services.modelRuntime.getError();
   const settings: SettingsManager = services.settingsManager;
+  await rememberProviderModels(services.modelRuntime);
   // `enabledModels` supports globs and fuzzy patterns, so resolve it the same
   // way the CLI does instead of comparing pattern strings literally (#307).
   const scope = await resolveVisibleModels(
-    services.modelRuntime,
+    withDeferredProviderModels(services.modelRuntime),
     settings.getEnabledModels(),
   );
   const { visible, thinkingLevelPins, warnings } = scope;
-  modelList = visible.map((m) => ({
+  modelList = orderSelectorModels(scope).map((m) => ({
     id: m.id,
     name: m.name,
     provider: m.provider,
     input: m.input,
-  })).sort(compareModelEntries);
+  }));
   for (const m of visible) {
     const key = `${m.provider}:${m.id}`;
     nameMap.set(key, m.name);
@@ -82,21 +74,6 @@ async function loadModels(cwd: string): Promise<ModelsData> {
     ?? settings.getDefaultThinkingLevel()
     ?? null;
 
-  // Image-generation models: static pi-ai catalog filtered to providers with
-  // stored credentials. Failures degrade to an empty list — chat models must
-  // keep loading even when the images runtime misbehaves.
-  let imageModelList: { id: string; name: string; provider: string }[] = [];
-  try {
-    const registry = new ModelRegistry(services.modelRuntime);
-    const imagesModels = getImagesModels(imageCredentialsFromModelRegistry(registry));
-    imageModelList = (await listImageModels(
-      imagesModels,
-      (providerId) => Boolean(registry.getProviderAuthStatus(providerId)?.configured),
-    )).map((model) => ({ id: model.modelId, name: model.name, provider: model.provider }));
-  } catch (error) {
-    console.error("[pi-web] failed to list image models:", error instanceof Error ? error.message : error);
-  }
-
   return withModelRuntimeError(
     {
       models: Object.fromEntries(nameMap),
@@ -107,7 +84,6 @@ async function loadModels(cwd: string): Promise<ModelsData> {
       thinkingLevels,
       thinkingLevelMaps,
       thinkingLevelPins,
-      imageModelList,
       ...(warnings.length > 0 ? { modelScopeWarnings: warnings } : {}),
     },
     modelError,
@@ -123,12 +99,19 @@ const EMPTY_MODELS: ModelsData = {
   thinkingLevels: {},
   thinkingLevelMaps: {},
   thinkingLevelPins: {},
-  imageModelList: [],
 };
 
 export async function GET(req: Request) {
-  const requestedCwd = new URL(req.url).searchParams.get("cwd") || process.cwd();
-  const cwd = resolve(requestedCwd);
+  const requestedCwd = resolve(new URL(req.url).searchParams.get("cwd") || process.cwd());
+  // A subagent run isolated in a worktree has that worktree removed when the run
+  // finishes, yet its session file still records the worktree as its cwd. Fall back
+  // to the main repo it branched from, so opening a finished subagent resolves the
+  // same models a non-isolated one would. The roots check below runs on the folder
+  // actually answered from, so the fallback reaches no project that was not allowed
+  // by name already.
+  const cwd = existsSync(requestedCwd)
+    ? requestedCwd
+    : inferRemovedWorktree(requestedCwd)?.projectRoot ?? requestedCwd;
 
   let cwdStat;
   try {

@@ -1,11 +1,24 @@
 "use client";
 
-import { type MouseEvent } from "react";
-import { parseAnsiLine, stripAnsi } from "@/lib/ansi";
-import { resolveLocalFileHref } from "@/lib/file-links";
+import { stripAnsi } from "@/lib/ansi";
 import type { ExtensionStatusItem, ExtensionWidgetItem } from "@/lib/types";
 import { AnsiText } from "./AnsiText";
 import { ExtensionWidgets } from "./ExtensionWidgets";
+
+/**
+ * `ctx.ui.setStatus("command:/mode toggle", "Build")` shows "Build" as a button
+ * that sends `/mode toggle`. The command lives in the key because setStatus has
+ * no room for it, and Pi's own footer prints only the text, so the same status
+ * is still plain text there.
+ */
+export const EXTENSION_STATUS_COMMAND_PREFIX = "command:";
+
+/** The slash command a status key asks for, or null for an ordinary status. */
+export function extensionStatusCommand(key: string): string | null {
+  if (!key.startsWith(EXTENSION_STATUS_COMMAND_PREFIX)) return null;
+  const command = key.slice(EXTENSION_STATUS_COMMAND_PREFIX.length).trim();
+  return command.length > 1 && command.startsWith("/") ? command : null;
+}
 
 export function sanitizeExtensionStatusText(text: string): string {
   return text
@@ -16,85 +29,90 @@ export function sanitizeExtensionStatusText(text: string): string {
     .trim();
 }
 
+function sortedStatuses(statuses: ExtensionStatusItem[]): ExtensionStatusItem[] {
+  return [...statuses].sort((a, b) => a.key.localeCompare(b.key));
+}
+
 export function formatExtensionStatusLine(statuses: ExtensionStatusItem[]): string {
-  return [...statuses]
-    .sort((a, b) => a.key.localeCompare(b.key))
+  return sortedStatuses(statuses)
     .map(({ text }) => sanitizeExtensionStatusText(text))
     .join(" ");
 }
 
-/** True when the line carries OSC 8 file:// links this fork makes clickable. */
-function hasLocalFileLinks(statusLine: string): boolean {
-  return statusLine.includes("\x1b]8;;file://");
+type StatusCell =
+  | { kind: "text"; text: string }
+  | { kind: "command"; command: string; label: string };
+
+/** One cell per status, in key order. A status with nothing visible to show has no cell. */
+export function buildExtensionStatusCells(statuses: ExtensionStatusItem[]): StatusCell[] {
+  const cells: StatusCell[] = [];
+  for (const item of sortedStatuses(statuses)) {
+    const text = sanitizeExtensionStatusText(item.text);
+    const command = extensionStatusCommand(item.key);
+    if (command) {
+      const label = stripAnsi(text).replace(/\s+/g, " ").trim();
+      cells.push({ kind: "command", command, label: label || command });
+    } else if (stripAnsi(text).trim()) {
+      cells.push({ kind: "text", text });
+    }
+  }
+  return cells;
 }
 
 export function ExtensionStatusBar({
   statuses,
   widgets = [],
-  onOpenFile,
+  onCommand,
+  commandsDisabled = false,
 }: {
   statuses: ExtensionStatusItem[];
   widgets?: ExtensionWidgetItem[];
-  onOpenFile?: (filePath: string) => void;
+  /** Sends the command of a `command:` status; without it those buttons stay disabled. */
+  onCommand?: (command: string) => void;
+  commandsDisabled?: boolean;
 }) {
-  if (statuses.length === 0 && widgets.length === 0) return null;
+  const cells = buildExtensionStatusCells(statuses);
+  if (cells.length === 0 && widgets.length === 0) return null;
 
-  const statusLine = formatExtensionStatusLine(statuses);
-  const plainStatusLine = stripAnsi(statusLine);
+  const hasCommands = cells.some((cell) => cell.kind === "command");
+  const plainStatusLine = cells
+    .map((cell) => (cell.kind === "text" ? stripAnsi(cell.text) : cell.label))
+    .join(" ");
 
-  const renderSegmentLink = (
-    segment: ReturnType<typeof parseAnsiLine>[number],
-    index: number,
-  ) => {
-    if (!segment.link) {
-      return <span key={index} style={segment.style}>{segment.text}</span>;
-    }
-
-    const filePath = resolveLocalFileHref(segment.link);
-    const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
-      if (!filePath || !onOpenFile) return;
-      if (event.defaultPrevented || event.button !== 0) return;
-      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-      event.preventDefault();
-      onOpenFile(filePath);
-    };
-
-    return (
-      <a
-        key={index}
-        href={segment.link}
-        target="_blank"
-        rel="noopener noreferrer"
-        onClick={handleClick}
-        style={{ ...segment.style, textDecoration: "underline" }}
-      >
-        {segment.text}
-      </a>
-    );
-  };
+  const statusLine = cells.length > 0 ? (
+    <div
+      role="status"
+      className="extension-status-line"
+      aria-label={plainStatusLine}
+      title={plainStatusLine}
+    >
+      <span className="extension-status-text">
+        {cells.map((cell, index) => cell.kind === "text" ? (
+          <span key={index} className="extension-status-item">
+            <AnsiText text={cell.text} />
+          </span>
+        ) : (
+          <button
+            key={index}
+            type="button"
+            className="extension-status-item extension-status-command"
+            disabled={!onCommand || commandsDisabled}
+            title={`${cell.label} · ${cell.command}`}
+            aria-label={`${cell.label} (${cell.command})`}
+            onClick={() => onCommand?.(cell.command)}
+          >
+            {cell.label}
+          </button>
+        ))}
+      </span>
+    </div>
+  ) : null;
 
   return (
     <div
-      className={`extension-status-shelf${widgets.length > 0 ? " has-widgets" : ""}${statuses.length > 0 ? " has-status" : ""}`}
+      className={`extension-status-shelf${widgets.length > 0 ? " has-widgets" : ""}${cells.length > 0 ? " has-status" : ""}${hasCommands ? " has-commands" : ""}`}
     >
-      {widgets.length > 0 && <ExtensionWidgets widgets={widgets} />}
-      {statuses.length > 0 && (
-        <div
-          role="status"
-          className="extension-status-line"
-          aria-label={plainStatusLine}
-          title={plainStatusLine}
-        >
-          <span className="extension-status-text">
-            {/* ansi_up covers the full SGR set faithfully; local file://
-                hyperlinks fall back to parseAnsiLine so clicking opens the
-                file tab instead of a raw browser navigation. */}
-            {hasLocalFileLinks(statusLine)
-              ? parseAnsiLine(statusLine).map(renderSegmentLink)
-              : <AnsiText text={statusLine} />}
-          </span>
-        </div>
-      )}
+      {widgets.length > 0 ? <ExtensionWidgets widgets={widgets}>{statusLine}</ExtensionWidgets> : statusLine}
     </div>
   );
 }

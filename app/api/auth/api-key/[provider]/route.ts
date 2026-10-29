@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { removeStoredCredentialIfType, storeProviderCredential } from "@/lib/provider-credential-store";
-import { createModelRuntimeWithExtensions } from "@/lib/model-runtime";
+import { getModelRuntimeWithExtensions } from "@/lib/model-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -10,22 +10,12 @@ type Params = { params: Promise<{ provider: string }> };
 // POST /api/auth/api-key/[provider]  body: { apiKey: string }
 export async function POST(req: Request, { params }: Params) {
   const { provider } = await params;
-  let body: { apiKey?: unknown };
   try {
-    const parsed: unknown = await req.json();
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return NextResponse.json({ error: "Body must be a JSON object" }, { status: 400 });
+    const { apiKey } = await req.json() as { apiKey?: string };
+    if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
+      return NextResponse.json({ error: "apiKey is required" }, { status: 400 });
     }
-    body = parsed;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-  const { apiKey } = body;
-  if (typeof apiKey !== "string" || !apiKey.trim()) {
-    return NextResponse.json({ error: "apiKey is required" }, { status: 400 });
-  }
-  try {
-    const modelRuntime = await createModelRuntimeWithExtensions();
+    const modelRuntime = await getModelRuntimeWithExtensions();
     const apiKeyAuth = modelRuntime.getProvider(provider)?.auth.apiKey;
     if (!apiKeyAuth?.login) {
       throw new Error(`${provider} does not support API key login`);

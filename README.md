@@ -1,6 +1,6 @@
 # Pi Web
 
-[中文文档](./README.zh-CN.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
+[中文文档](./docs/README.zh-CN.md) | [日本語](./docs/README.ja.md) | [Русский](./docs/README.ru.md)
 
 Local browser UI for the [pi coding agent](https://github.com/earendil-works/pi). Pi Web uses the same local configuration and session files as pi, so you can browse and resume conversations, run agent turns, configure models and resources, and inspect project files from a browser.
 
@@ -36,7 +36,17 @@ npm install -g @agegr/pi-web@latest
 pi-web
 ```
 
-To update, stop the running process with `Ctrl+C` and run the same install command again. To uninstall, run `npm uninstall -g @agegr/pi-web`.
+Commands:
+
+```bash
+pi-web version          # print the installed version
+pi-web status           # list running servers
+pi-web stop [--port N]  # stop a running server
+pi-web open [--port N]  # open a running server in the browser
+pi-web update [--check] # update a global npm install
+```
+
+To update, run `pi-web stop`, then `pi-web update` (or run the same install command again). To uninstall, run `npm uninstall -g @agegr/pi-web`.
 
 ## Configuration
 
@@ -48,11 +58,14 @@ For port and hostname, command-line options override the corresponding environme
 | `--port <port>`, `-p <port>`, or `PORT` | Server port | `30141` |
 | `--hostname <host>`, `-H <host>`, or `PI_WEB_HOSTNAME` | Bind hostname | `127.0.0.1` |
 | `--no-open` or `PI_WEB_NO_OPEN=1` | Do not open a browser automatically | Browser opens |
+| `PI_WEB_APP_NAME` | PWA manifest `name` and `short_name`; surrounding whitespace is trimmed, empty values use the default | `Pi Web` |
 | `PI_WEB_SKIP_VERSION_CHECK=1` | Disable Pi Web update checks | Unset |
 | `PI_WEB_ALLOWED_HOSTS` | Additional exact proxy or custom hostnames, comma-separated | Unset |
 | `PI_WEB_PASSWORD` | Enable browser password login; API clients may use Basic Auth with username `pi` | Authentication disabled |
 | `PI_WEB_IDLE_TIMEOUT_MS` | Session idle timeout in milliseconds, up to `2147483647`; `0` disables idle shutdown; invalid or out-of-range values use the default | `600000` (10 min) |
 | `PI_WEB_SHUTDOWN_DEADLINE_MS` | How long extensions get to handle `session_shutdown` before a closing session is disposed anyway, in milliseconds up to `2147483647`; `0`, invalid or out-of-range values use the default | `5000` (5 s) |
+
+Set `PI_WEB_APP_NAME` before starting the server (for example, `PI_WEB_APP_NAME='Work Pi' pi-web`). After changing it, restart the server to serve the new manifest; no rebuild is required. Updates to the name of an already installed PWA are managed by the browser and are not guaranteed to appear immediately. This does not change the page title or icons.
 
 For example:
 
@@ -97,7 +110,7 @@ npx @agegr/pi-web@latest
 
 - **Agent data**: Pi Web reads pi data from `~/.pi/agent` by default, including session files under `sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`. Set `PI_CODING_AGENT_DIR` to use another pi agent directory.
 - **Filesystem access**: Pi Web must be able to read the agent data directory and the working directories recorded by its sessions. Run Pi Web in the same filesystem environment as pi when sharing existing sessions.
-- **Shared configuration**: the Models panel uses pi's model, settings, and credential storage, so changes are visible to both interfaces.
+- **Shared configuration**: the Models panel uses pi's model, settings, and credential storage, so changes are visible to both interfaces. An open session applies a saved edit of its model when you select the model again.
 - **File access boundary**: the file browser is limited to working directories selected in Pi Web and project or session roots it already knows about; it is not a general filesystem browser.
 - **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for switcher visibility, worktree creation, and removal behavior.
 
@@ -121,9 +134,13 @@ window.addEventListener("pi-web:session-row-contextmenu", (event) => {
 
 The detail object contains `id`, `path`, `cwd`, optional `name`, pointer
 coordinates, and a `refresh()` callback for actions that change the session
-list. If no listener cancels the extension event, Pi Web preserves the
-browser's native context menu. This hook is browser-side and independent of
-Pi agent extensions.
+list. If no listener cancels the extension event, Pi Web opens its built-in
+session menu (pin, rename, fork, mark read or unread, archive, open in new
+tab, delete) at the pointer instead of the browser's native context menu.
+The row's `⋯` button always opens the built-in menu and does not dispatch the
+event. Sessions not yet saved to disk get no built-in menu, so the native one
+still appears for them. This hook is browser-side and independent of Pi agent
+extensions.
 
 ### Extension Session Liveness
 
@@ -165,6 +182,8 @@ npm run lint
 ```
 
 Do not run `next build` or `npm run build` during normal development. It writes to `.next/` and can interfere with the development server; leave builds for release work.
+
+Before starting on a feature, read [Contributing](./CONTRIBUTING.md) for what is in scope and the pull request checklist.
 
 Contributor guides: [Internationalization](./docs/i18n.md) and [Release process](./docs/release.md).
 

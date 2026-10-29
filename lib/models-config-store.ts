@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
@@ -102,12 +102,26 @@ export function writeModelsConfig(
   data: Record<string, unknown>,
   modelsPath = getModelsConfigPath(),
 ): void {
-  // Never overwrite an unreadable existing config with an incomplete panel draft.
+  // Refuse to replace a file this panel could not read: the draft being saved
+  // was not built from it, so writing would silently discard its contents.
   readModelsConfig(modelsPath);
-  const normalized = normalizeModelsConfigCosts(sanitizeModelsConfig(data));
-  const serialized = JSON.stringify(normalized, null, 2);
   const dir = dirname(modelsPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writePrivateFileAtomicSync(modelsPath, serialized);
+  const normalized = normalizeModelsConfigCosts(sanitizeModelsConfig(data));
+  // models.json may be a symbolic link (a dotfiles setup). The atomic write
+  // renames a temp file over the destination path, which would replace the
+  // link itself and leave its target holding the old contents, so write
+  // through the resolved path instead. A dangling link is refused: the read
+  // guard above reports it as missing, and replacing it would silently break
+  // the user's link.
+  let writePath = modelsPath;
+  if (lstatSync(modelsPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    try {
+      writePath = realpathSync(modelsPath);
+    } catch {
+      throw new ModelsConfigReadError(`Failed to write ${modelsPath}: dangling symbolic link`);
+    }
+  }
+  writePrivateFileAtomicSync(writePath, JSON.stringify(normalized, null, 2));
   invalidateModelsCache();
 }

@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { resolveSessionPath, openSessionManager, buildSessionContext } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { attachTranscriptNotices, readSessionTranscriptNotices } from "@/lib/transcript-notices-server";
+import type { SessionEntry } from "@/lib/types";
 
 export async function GET(
   req: Request,
@@ -29,18 +31,22 @@ export async function GET(
     const sm = liveRpc?.inner.sessionManager ?? openSessionManager(filePath!);
     // `before` is the oldest entry already on the client; fetch its ancestors
     // only (excludeLeaf) so prepending the page does not duplicate `before`.
-    // Omitted leaf means the manager's active branch, not the last entry in the
-    // file. Preserve null: editing the first user message leaves an empty root.
-    const activeLeafId = leafId ?? sm.getLeafId();
-    const context = buildSessionContext(sm.getEntries() as never, before ?? activeLeafId, {
+    const entries = sm.getEntries();
+    const transcriptNotices = readSessionTranscriptNotices({
+      entries: entries as unknown as SessionEntry[],
+      cwd: sm.getHeader()?.cwd ?? "",
+      leafId: leafId ?? sm.getLeafId(),
+      models: liveRpc?.inner.modelRuntime,
+    });
+    const context = attachTranscriptNotices(buildSessionContext(entries as never, before ?? leafId, {
       deferThinking,
       deferToolResultImages,
       tail,
       excludeLeaf: Boolean(before),
       sessionId: id,
-    });
+    }), transcriptNotices);
 
-    return NextResponse.json({ context, leafId: activeLeafId, tail, before: before ?? null });
+    return NextResponse.json({ context, tail, before: before ?? null });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

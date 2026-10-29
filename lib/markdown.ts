@@ -1,31 +1,99 @@
 import type { Content, Link, Parent, Root } from "mdast";
+import type { Element as HastElement, Root as HastRoot, RootContent as HastContent } from "hast";
 import { defaultUrlTransform, type Options as ReactMarkdownOptions } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkFrontmatter from "remark-frontmatter";
 import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
 import remarkCjkFriendly from "remark-cjk-friendly/parseOnly";
-import { fromMarkdown } from "mdast-util-from-markdown";
+import remarkMath from "remark-math";
 import type { Plugin } from "unified";
 import type { Extension } from "micromark-util-types";
 
+// Link schemes of desktop apps that open a note, a file or a meeting (#1108).
+// A fixed list, not "any scheme but javascript:": the text comes from the model
+// and from repository files, and OS handlers such as ms-msdt: or search-ms:
+// have been exploited through a clicked link.
+const appLinkSchemes = [
+  "obsidian", "logseq", "notion",
+  "vscode", "vscode-insiders", "cursor", "zed", "jetbrains",
+  "zoommtg", "zoomus", "msteams", "slack",
+];
+const appLinkPattern = new RegExp(`^(?:${appLinkSchemes.join("|")}):`, "i");
+
+// The anti-clobber prefix the sanitizer puts in front of every `id` in
+// rendered content, so untrusted Markdown cannot shadow the page's own
+// elements. The fragment-link fix below must use the identical value, so the
+// schema that produces the prefixed ids pins the same constant.
+const markdownClobberPrefix = defaultSchema.clobberPrefix ?? "user-content-";
+
 const markdownSanitizeSchema = {
   ...defaultSchema,
+  clobberPrefix: markdownClobberPrefix,
   attributes: {
     ...defaultSchema.attributes,
     code: [["className", /^language-./, "math-inline", "math-display"]],
   },
   protocols: {
     ...defaultSchema.protocols,
-    href: [...(defaultSchema.protocols?.href ?? []), "file"],
+    href: [...(defaultSchema.protocols?.href ?? []), "file", ...appLinkSchemes],
   },
   strip: [...(defaultSchema.strip || []), "iframe", "object", "style", "form"],
 };
 
+/** react-markdown's URL filter, plus links to the apps above. */
+export function markdownAppUrlTransform(value: string): string {
+  return appLinkPattern.test(value) ? value : defaultUrlTransform(value);
+}
+
+/** Also keeps `file:` links, for renderers that open local files in the app. */
 export function markdownUrlTransform(value: string): string {
-  return /^file:/i.test(value) ? value : defaultUrlTransform(value);
+  return /^file:/i.test(value) ? value : markdownAppUrlTransform(value);
+}
+
+/** A link that leaves the page: it names a scheme or another host. */
+export function isExternalMarkdownHref(href: string | undefined): boolean {
+  return Boolean(href && /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(href));
+}
+
+interface MarkdownFragmentClick {
+  defaultPrevented: boolean;
+  button: number;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+  currentTarget: Pick<Element, "getAttribute" | "closest">;
+  preventDefault(): void;
+}
+
+/**
+ * A click on a `#fragment` link in rendered Markdown: brings the element it
+ * names into view within the same rendered document (the closest
+ * `.markdown-body`), as the Skills reader does with its headings. The browser's
+ * own jump searches the whole page, where every chat message with a footnote
+ * has its own `user-content-user-content-fn-1` and the file preview sits beside
+ * the chat, so it could land in another message; it would also put the
+ * fragment in the app's URL as a history entry. Modified clicks stay the
+ * browser's.
+ */
+export function jumpToMarkdownFragment(event: MarkdownFragmentClick): void {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const href = event.currentTarget.getAttribute("href");
+  if (!href?.startsWith("#")) return;
+  event.preventDefault();
+  let id = href.slice(1);
+  if (!id) return;
+  try {
+    id = decodeURIComponent(id);
+  } catch {
+    // A malformed escape is matched as written.
+  }
+  const name = CSS.escape(id);
+  event.currentTarget.closest(".markdown-body")
+    ?.querySelector(`[id="${name}"], a[name="${name}"]`)
+    ?.scrollIntoView({ block: "start" });
 }
 
 /**
@@ -57,129 +125,50 @@ function replaceNotPrecededBy(
   return result + value.slice(copied);
 }
 
-// Use the CommonMark parser's source ranges, rather than a second approximate
-// fence parser. This also covers nested list/quote fences and multiline spans.
-function protectCode(markdown: string, includeSingleSpans: boolean) {
-  const ranges: Array<[number, number]> = [];
-  const tree = fromMarkdown(markdown);
-  const pending: Array<typeof tree | (typeof tree.children)[number]> = [tree];
-  while (pending.length) {
-    const node = pending.pop()!;
-    const start = node.position?.start.offset;
-    const end = node.position?.end.offset;
-    if (start !== undefined && end !== undefined && (
-      node.type === "code" || (!includeSingleSpans && (node.type === "link" || node.type === "image" || node.type === "definition")) ||
-      (node.type === "inlineCode" && (includeSingleSpans || markdown.slice(start).startsWith("``")))
-    )) {
-      ranges.push([start, end]);
-      continue;
-    }
-    if ("children" in node) {
-      for (let i = node.children.length - 1; i >= 0; i--) pending.push(node.children[i] as typeof node);
-    }
-  }
-  // Choose a sentinel absent from the source; source text must round-trip even
-  // if a user happens to paste one of our private-use characters.
-  const occupied = new Set(Array.from(markdown.matchAll(/\uE000(\d+)\uE001/g), (match) => match[1]));
-  let namespace = 0;
-  while (occupied.has(String(namespace))) namespace++;
-  const sentinel = `\uE000${namespace}\uE001`;
-  const tokenPattern = `${sentinel}(\\d+)\uE002`;
-  const protectedPattern = new RegExp(tokenPattern);
-  const originals: string[] = [];
-  let cursor = 0;
-  let masked = "";
-  for (const [start, end] of ranges) {
-    masked += markdown.slice(cursor, start);
-    masked += markdown.slice(start, end).replace(/[^\r\n]+/g, (part) => {
-      const token = `${sentinel}${originals.length}\uE002`;
-      originals.push(part);
-      return token;
-    });
-    cursor = end;
-  }
-  masked += markdown.slice(cursor);
-  return {
-    masked,
-    hasProtected: (line: string) => protectedPattern.test(line),
-    restore(value: string) {
-      return value.replace(new RegExp(tokenPattern, "g"), (_, id: string) => originals[Number(id)]);
-    },
-  };
-}
-
-function isEscaped(value: string, index: number): boolean {
-  let count = 0;
-  while (index > 0 && value[--index] === "\\") count++;
-  return count % 2 === 1;
-}
+// The closing backtick must not follow `\` or another backtick, so the content
+// ends with a character that is neither.
+const escapedInlineCodePattern = /`((?:[^`\n]|\\`)*?[^\\`\n])`(?!`)/y;
 
 function rewriteEscapedInlineCodeBackticks(line: string): string {
-  // A not-yet-closed multi-backtick span may be a streaming prefix. Do not
-  // reinterpret its interior as our nonstandard single-tick compatibility form.
-  for (const run of line.matchAll(/`{2,}/g)) {
-    if (!isEscaped(line, run.index)) return line;
-  }
-  let result = "";
-  let cursor = 0;
-  for (let start = 0; start < line.length; start++) {
-    if (line[start] !== "`" || isEscaped(line, start) || line[start - 1] === "`" || line[start + 1] === "`") continue;
-    let end = start + 1;
-    while (end < line.length && (line[end] !== "`" || isEscaped(line, end))) end++;
-    if (end === line.length) break;
-    // A multi-backtick delimiter belongs to CommonMark, not this compatibility
-    // syntax. Never split it into single-backtick spans.
-    if (line[end + 1] === "`") continue;
-    const content = line.slice(start + 1, end);
+  return replaceNotPrecededBy(line, "`", "\\`", escapedInlineCodePattern, ([match, content]) => {
     const code = content.replace(/\\`/g, "`");
-    if (code !== content) {
-      const marker = "`".repeat(Math.max(...(code.match(/`+/g)?.map((run) => run.length) ?? [0])) + 1);
-      // CommonMark strips one surrounding space when content is not all spaces.
-      // Padding prevents edge backticks merging into the delimiter run.
-      const pad = code.startsWith("`") || code.endsWith("`") || (code.startsWith(" ") && code.endsWith(" ") && /\S/.test(code));
-      result += line.slice(cursor, start) + marker + (pad ? " " : "") + code + (pad ? " " : "") + marker;
-      cursor = end + 1;
-    }
-    start = end;
-  }
-  return result + line.slice(cursor);
+    if (code === content) return match;
+    const marker = "`".repeat(Math.max(...(code.match(/`+/g)?.map((run) => run.length) ?? [0])) + 1);
+    return `${marker}${code}${marker}`;
+  });
 }
 
 export function normalizeDisplayMath(markdown: string): string {
-  // Ordinary prose (including streaming CJK emphasis) needs no preprocessing.
-  if (!/[\\$]/.test(markdown)) return markdown;
-  if (!markdown.includes("\\`")) {
-    const protectedCode = protectCode(markdown, true);
-    return protectedCode.restore(normalizeUnprotectedMath(protectedCode.masked, protectedCode.hasProtected));
-  }
-  const protectedSource = protectCode(markdown, false);
-  let rawTag: string | null = null;
-  const rewritten = protectedSource.restore(protectedSource.masked.split("\n").map((line) => {
-    const tag = rawTag ?? line.match(/<(code|pre|script|style)\b/i)?.[1]?.toLowerCase();
-    if (tag) {
-      rawTag = new RegExp(`</${tag}\\s*>`, "i").test(line) ? null : tag;
-      return line;
-    }
-    // Preserve the existing conservative HTML-line policy.
-    return /<(?:!--|\/?[A-Za-z][^>]*>)/.test(line) ? line : rewriteEscapedInlineCodeBackticks(line);
-  }).join("\n"));
-  const protectedCode = protectCode(rewritten, true);
-  return protectedCode.restore(normalizeUnprotectedMath(protectedCode.masked, protectedCode.hasProtected));
-}
-
-function normalizeUnprotectedMath(markdown: string, hasProtected: (line: string) => boolean): string {
   const lineBreak = markdown.includes("\r\n") ? "\r\n" : "\n";
   const lines = markdown.split(/\r?\n/);
   const normalized: string[] = [];
+  let fence: { marker: string; size: number } | null = null;
+  let inlineCodeMarkerSize = 0;
   let rawCodeTag: string | null = null;
   const unmatchedDisplayMathUntil = new Map<string, number>();
 
   for (let index = 0; index < lines.length; index++) {
-    const line = lines[index];
+    let line = lines[index];
 
     if (rawCodeTag) {
       normalized.push(line);
       if (new RegExp(`</${rawCodeTag}\\s*>`, "i").test(line)) rawCodeTag = null;
+      continue;
+    }
+
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0];
+      const size = fenceMatch[1].length;
+      if (!fence) fence = { marker, size };
+      else if (marker === fence.marker && size >= fence.size) fence = null;
+      inlineCodeMarkerSize = 0;
+      normalized.push(line);
+      continue;
+    }
+
+    if (fence) {
+      normalized.push(line);
       continue;
     }
 
@@ -188,17 +177,22 @@ function normalizeUnprotectedMath(markdown: string, hasProtected: (line: string)
       const tag = rawCodeOpen[1].toLowerCase();
       const remainder = line.slice((rawCodeOpen.index ?? 0) + rawCodeOpen[0].length);
       if (!new RegExp(`</${tag}\\s*>`, "i").test(remainder)) rawCodeTag = tag;
+      inlineCodeMarkerSize = 0;
       normalized.push(line);
       continue;
     }
 
     if (/^(?: {4}|\t)/.test(line) || line.trim() === "") {
+      inlineCodeMarkerSize = 0;
       normalized.push(line);
       continue;
     }
 
-    if (hasProtected(line)) {
-      normalized.push(normalizeInlineLatexMath(line, hasProtected));
+    if (!inlineCodeMarkerSize) line = rewriteEscapedInlineCodeBackticks(line);
+
+    if (inlineCodeMarkerSize || line.includes("`")) {
+      inlineCodeMarkerSize = updateInlineCodeMarker(line, inlineCodeMarkerSize);
+      normalized.push(line);
       continue;
     }
 
@@ -235,7 +229,7 @@ function normalizeUnprotectedMath(markdown: string, hasProtected: (line: string)
 
     const bracketDisplayStart = line.match(/^([ ]{0,3})\\\[[ \t]*$/);
     if (bracketDisplayStart) {
-      const closingIndex = findBracketDisplayClose(lines, index + 1, hasProtected);
+      const closingIndex = findBracketDisplayClose(lines, index + 1);
       if (closingIndex !== -1) {
         // Same lazy-continuation guard as above: indent content lines that sit at
         // column 0 so the block stays parseable when nested inside a list item.
@@ -284,7 +278,6 @@ function normalizeUnprotectedMath(markdown: string, hasProtected: (line: string)
           index + 1,
           indent,
           unmatchedDisplayMathUntil,
-          hasProtected,
         );
         if (closing) {
           normalized.push(`${indent}$$`, `${indent}${firstLine}`);
@@ -315,7 +308,6 @@ function normalizeUnprotectedMath(markdown: string, hasProtected: (line: string)
         index + 1,
         indent,
         unmatchedDisplayMathUntil,
-        hasProtected,
       );
       if (closing && (closing.glued || indent !== "")) {
         normalized.push(`${indent}$$`);
@@ -329,7 +321,7 @@ function normalizeUnprotectedMath(markdown: string, hasProtected: (line: string)
       }
     }
 
-    normalized.push(normalizeInlineLatexMath(line, hasProtected));
+    normalized.push(normalizeInlineLatexMath(line));
   }
 
   return normalized.join(lineBreak);
@@ -346,7 +338,6 @@ function findDisplayMathClose(
   startIndex: number,
   indent: string,
   unmatchedUntil: Map<string, number>,
-  hasProtected: (line: string) => boolean,
 ): DisplayMathClose | null {
   const knownUnmatchedUntil = unmatchedUntil.get(indent);
   if (knownUnmatchedUntil !== undefined && startIndex < knownUnmatchedUntil) return null;
@@ -357,7 +348,7 @@ function findDisplayMathClose(
 
     // A new Markdown block cannot belong to the preceding formula. In particular,
     // do not let a later sibling list item provide a closing `$$` for this block.
-    if (hasProtected(line) || isDisplayMathBlockBoundary(line) || isDisplayMathOpeningLine(line)) {
+    if (isDisplayMathBlockBoundary(line) || isDisplayMathOpeningLine(line)) {
       unmatchedUntil.set(indent, index);
       return null;
     }
@@ -409,14 +400,13 @@ function indentDisplayMathContent(line: string, indent: string): string {
   return `${indent.slice(leadingSpaces)}${line}`;
 }
 
-function findBracketDisplayClose(lines: string[], startIndex: number, hasProtected: (line: string) => boolean): number {
+function findBracketDisplayClose(lines: string[], startIndex: number): number {
   for (let index = startIndex; index < lines.length; index++) {
     const line = lines[index];
     if (/^ {0,3}\\\][ \t]*$/.test(line)) return index;
 
     // Do not pair delimiters across another Markdown block boundary.
     if (
-      hasProtected(line) ||
       /^ {0,3}(`{3,}|~{3,})/.test(line) ||
       /^ {0,3}\\\[[ \t]*$/.test(line) ||
       /<(code|pre|script|style)\b/i.test(line)
@@ -428,10 +418,28 @@ function findBracketDisplayClose(lines: string[], startIndex: number, hasProtect
   return -1;
 }
 
+function updateInlineCodeMarker(line: string, initialMarkerSize: number): number {
+  let markerSize = initialMarkerSize;
+  for (let cursor = 0; cursor < line.length;) {
+    if (line[cursor] !== "`") {
+      cursor++;
+      continue;
+    }
+
+    let end = cursor + 1;
+    while (line[end] === "`") end++;
+    const runSize = end - cursor;
+    if (markerSize === 0) markerSize = runSize;
+    else if (runSize === markerSize) markerSize = 0;
+    cursor = end;
+  }
+  return markerSize;
+}
+
 // `\(` … `\)` whose closing backslash is not itself escaped.
 const inlineLatexMathPattern = /\\\(([^`\r\n$]*?[^`\r\n$\\])\\\)/y;
 
-function normalizeInlineLatexMath(line: string, hasProtected: (text: string) => boolean): string {
+function normalizeInlineLatexMath(line: string): string {
   if (
     /^\s{0,3}\[[^\]]+\]:/.test(line) ||
     /]\s*\(/.test(line) ||
@@ -442,9 +450,8 @@ function normalizeInlineLatexMath(line: string, hasProtected: (text: string) => 
     return line;
   }
 
-  // Never bridge protected code into KaTeX; other pairs normalize independently.
   return replaceNotPrecededBy(line, "\\(", "\\", inlineLatexMathPattern, ([match, math]) =>
-    math.trim() && !hasProtected(math) ? `$${math}$` : match,
+    math.trim() ? `$${math}$` : match,
   );
 }
 
@@ -642,14 +649,92 @@ export const markdownPreviewRemarkPlugins: ReactMarkdownOptions["remarkPlugins"]
   remarkCurrencySafeMath,
 ];
 
+interface SanitizedNode {
+  type?: string;
+  properties?: Record<string, unknown>;
+  children?: SanitizedNode[];
+}
+
+/**
+ * GitHub rewrites both sides of a content anchor. cmark-gfm prefixes rendered
+ * `id`s with `user-content-` (anti-clobber) and rewrites same-document fragment
+ * links to match, so a hand-written pair like `<a id="toc"></a>` with
+ * `[ToC](#toc)` still lands after rendering. `rehype-sanitize` copies only the
+ * `id` half of that — `defaultSchema`'s `clobber` + `clobberPrefix` — which on
+ * its own breaks every in-document anchor pair: the element gains the prefix
+ * and the link pointing at it does not.
+ *
+ * This plugin runs after sanitizing and prefixes fragment links exactly as
+ * unconditionally as sanitizing prefixes ids, so an id and an href that matched
+ * before sanitizing still match afterwards. Footnote references need it for the
+ * same reason: `mdast-util-to-hast` generates both their sides already prefixed
+ * and sanitizing prefixes the id once more, so an unprefixed href would strand
+ * the footnote link behind the doubled prefix.
+ *
+ * Links to page elements keep being unreachable from Markdown — that is the
+ * clobber protection doing its job, not this plugin. A bare `#` has no fragment
+ * to pair and stays as written.
+ */
+function rehypeMatchClobberedIds(): (tree: unknown) => void {
+  return (tree: unknown): void => {
+    const visit = (node: SanitizedNode): void => {
+      if (!node || typeof node !== "object") return;
+      const href = node.properties?.href;
+      if (node.type === "element" && typeof href === "string" && href.startsWith("#") && href.length > 1) {
+        node.properties!.href = `#${markdownClobberPrefix}${href.slice(1)}`;
+      }
+      for (const child of node.children ?? []) visit(child);
+    };
+    visit(tree as SanitizedNode);
+  };
+}
+
 export const markdownRehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [
   rehypeRaw,
   [rehypeSanitize, markdownSanitizeSchema],
+  rehypeMatchClobberedIds,
+  [rehypeKatex, { throwOnError: false, strict: false }],
+];
+
+function hastText(node: HastContent): string {
+  return node.type === "text" ? node.value : node.type === "element" ? node.children.map(hastText).join("") : "";
+}
+
+/** GitHub's heading slugs for `#fragment` links, as a data attribute: two rendered documents never share an id. */
+function markdownHeadingAnchors() {
+  return (tree: HastRoot) => {
+    const seen = new Map<string, number>();
+    const visit = (node: HastRoot | HastElement) => node.children.forEach((child) => {
+      if (child.type !== "element") return;
+      if (/^h[1-6]$/.test(child.tagName)) {
+        const base = hastText(child).toLowerCase().replace(/[^\p{L}\p{M}\p{N}_\- ]/gu, "").replace(/ /g, "-");
+        // As github-slugger numbers repeats: "a", "a", "a-1" become a, a-1, a-1-1.
+        let slug = base;
+        while (seen.has(slug)) {
+          seen.set(base, seen.get(base)! + 1);
+          slug = `${base}-${seen.get(base)}`;
+        }
+        seen.set(slug, 0);
+        child.properties.dataHeadingAnchor = slug;
+      }
+      visit(child);
+    });
+    visit(tree);
+  };
+}
+
+// A document whose `#fragment` links lead to its headings (Settings › Skills).
+// Anchors come before KaTeX, which writes each formula's text twice.
+export const markdownDocumentRehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [
+  rehypeRaw,
+  [rehypeSanitize, markdownSanitizeSchema],
+  markdownHeadingAnchors,
   [rehypeKatex, { throwOnError: false, strict: false }],
 ];
 
 export const markdownPreviewRehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [
   rehypeRaw,
   [rehypeSanitize, markdownSanitizeSchema],
+  rehypeMatchClobberedIds,
   [rehypeKatex, { throwOnError: false, strict: false }],
 ];
