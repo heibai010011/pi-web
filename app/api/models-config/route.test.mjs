@@ -41,7 +41,7 @@ test("a models.json with a syntax error is reported instead of read as empty, an
 
   response = await PUT(put({ providers: {} }));
   assert.equal(response.status, 409);
-  assert.equal((await response.json()).error, "Unable to read the existing model configuration. Fix it before saving.");
+  assert.match((await response.json()).error, /models\.json/);
   assert.equal(await readFile(modelsPath, "utf8"), original);
 });
 

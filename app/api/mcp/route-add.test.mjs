@@ -10,9 +10,7 @@ import { createJiti } from "jiti";
 // POST /api/mcp { action: "add" } writes the user's files and trust.json, so
 // every case runs against a PI_CODING_AGENT_DIR in a temporary folder, never
 // the real ~/.pi/agent.
-// Windows TEMP is below the real home, whose ancestor skills can make a fake home non-fresh.
-const tempBase = process.platform === "win32" ? join(process.cwd(), "..") : tmpdir();
-const root = realpathSync(await mkdtemp(join(tempBase, "pi-web-mcp-add-route-")));
+const root = realpathSync(await mkdtemp(join(tmpdir(), "pi-web-mcp-add-route-")));
 const agentDir = join(root, "agent");
 const trusted = join(root, "trusted");
 const untrusted = join(root, "untrusted");
@@ -195,7 +193,7 @@ test("a fresh folder that gained resources since the panel offered the step is n
 test("a fresh folder with a link to nothing under .pi is not offered the step, and the step refuses it", async () => {
   // The SDK's existsSync sees nothing that needs trust yet; the link would need it once its target appears.
   await mkdir(join(fresh, ".pi"));
-  await symlink(join(root, "not-there-yet"), join(fresh, ".pi", "extensions"), process.platform === "win32" ? "junction" : "dir");
+  await symlink(join(root, "not-there-yet"), join(fresh, ".pi", "extensions"));
   const listed = await (await GET(new Request(`http://localhost/api/mcp?cwd=${encodeURIComponent(fresh)}`, { headers: { host: "localhost" } }))).json();
   assert.deepEqual(listed.project.trust, { requiresTrust: false, trusted: true, decision: null, inherited: false });
   assert.deepEqual(listed.project.trustFolder, { allowed: false, reason: "folder-not-fresh" }, "GET and POST share one freshness rule");
@@ -238,19 +236,14 @@ test("a folder whose trust would reach other folders is never trusted by the ste
   const home = join(root, "home");
   await mkdir(home, { recursive: true });
   allowFileRoot(home);
-  const previousHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
-  process.env.HOME = home; // project-trust's explicit HOME override
-  process.env.USERPROFILE = home; // Windows os.homedir(), used by the SDK
-  const restoreHome = () => {
-    for (const [key, value] of Object.entries(previousHome)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  };
-  t.after(restoreHome);
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    process.env.HOME = previousHome;
+  });
   response = await add({ text: "npx -y @scope/lint-mcp", scope: "project", cwd: home, trustFolder: true });
   assert.deepEqual(response.body.breadth, { kind: "home", path: home });
-  restoreHome();
+  process.env.HOME = previousHome;
 
   assert.deepEqual(await trustFile(), { [trusted]: true }, "nothing was trusted");
   for (const folder of [outer, root, home]) assert.equal(existsSync(projectPath(folder)), false);

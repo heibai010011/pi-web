@@ -151,7 +151,6 @@ export interface AgentSessionLike {
   readonly systemPrompt: string;
   readonly agent: {
     state?: {
-      messages?: ReturnType<SessionManager["buildSessionContext"]>["messages"];
       /** Replayed from the transcript's system messages since Pi 0.86; never assign it. */
       readonly systemPrompt?: string;
       thinkingLevel?: string;

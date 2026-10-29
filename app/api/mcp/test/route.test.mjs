@@ -7,7 +7,6 @@ import test, { after, beforeEach } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { createJiti } from "jiti";
-import { shellMarkerCommand } from "../../../../lib/__fixtures__/mcp-test-platform.mjs";
 
 // POST /api/mcp/test starts processes and reads mcp-auth.json, so every case
 // runs against a PI_CODING_AGENT_DIR in a temporary folder, never ~/.pi/agent.
@@ -59,7 +58,7 @@ beforeEach(async () => {
   delete process.env.PI_WEB_DISABLE_MCP;
   clearMcpStatuses();
   await writeFile(globalPath, `${JSON.stringify({ mcpServers: globalServers }, null, 2)}\n`);
-  await writeFile(projectPath, `${JSON.stringify({ mcpServers: { repo: fixture({ TOKEN: shellMarkerCommand(marker) }) } }, null, 2)}\n`);
+  await writeFile(projectPath, `${JSON.stringify({ mcpServers: { repo: fixture({ TOKEN: `!touch ${marker} && echo ok` }) } }, null, 2)}\n`);
   await rm(marker, { force: true });
   store.set(cwd, null);
 });
@@ -95,7 +94,6 @@ test("a global server is tested from its file and answers with what it found", a
   const home = join(root, "home");
   await mkdir(home, { recursive: true });
   setEnvFor(t, "HOME", home);
-  setEnvFor(t, "USERPROFILE", home);
   assert.equal(homedir(), home);
   const { status, body } = await post({ scope: "global", name: "lint" });
   assert.equal(status, 200);

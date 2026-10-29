@@ -67,22 +67,13 @@ function toggleSkillFile(
 // "Disable all". A batch edits each file on its own and reports every one, so
 // a skill the route refuses does not stop the rest.
 export async function PATCH(req: Request) {
-  let body: Record<string, unknown>;
   try {
-    const parsed: unknown = await req.json();
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return NextResponse.json({ error: "Body must be a JSON object" }, { status: 400 });
-    }
-    body = parsed as Record<string, unknown>;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-  const { filePath, filePaths, disableModelInvocation } = body;
-  if (filePaths === undefined && (typeof filePath !== "string" || !filePath.trim())) return NextResponse.json({ error: "filePath required" }, { status: 400 });
-  if (typeof disableModelInvocation !== "boolean") {
-    return NextResponse.json({ error: "disableModelInvocation must be a boolean" }, { status: 400 });
-  }
-  try {
+    const body = await req.json() as {
+      filePath?: string;
+      filePaths?: unknown;
+      disableModelInvocation: boolean;
+    };
+    const { filePath, filePaths, disableModelInvocation } = body;
 
     if (filePaths !== undefined) {
       if (!Array.isArray(filePaths) || !filePaths.every((item) => typeof item === "string" && item)) {
@@ -104,7 +95,7 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ results });
     }
 
-    if (typeof filePath !== "string" || !filePath.trim()) return NextResponse.json({ error: "filePath required" }, { status: 400 });
+    if (!filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
     const refused = toggleSkillFile(filePath, disableModelInvocation, await getSkillEditRoots());
     if (refused) return NextResponse.json({ error: refused.error }, { status: refused.status });
     return NextResponse.json({ success: true });

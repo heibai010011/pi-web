@@ -1,7 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Noto_Sans_Mono } from "next/font/google";
 import { PwaRegistration } from "@/components/PwaRegistration";
-import { getDevServiceWorkerCleanupScript } from "@/lib/dev-service-worker-cleanup";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
 import "katex/dist/katex.min.css";
 import "./globals.css";
@@ -66,9 +65,6 @@ export default function RootLayout({
     <html lang="en" translate="no" className={`${notoSansMono.variable} notranslate`} suppressHydrationWarning>
       <head>
         <meta name="google" content="notranslate" />
-        {process.env.NODE_ENV !== "production" && (
-          <script dangerouslySetInnerHTML={{ __html: getDevServiceWorkerCleanupScript() }} />
-        )}
         <script
           dangerouslySetInnerHTML={{
             __html: THEME_INIT_SCRIPT,

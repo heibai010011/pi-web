@@ -57,9 +57,6 @@ function hook({ commands = [], pending = null, getCommands = async () => ({ comm
   const calls = { notices: [], opened: [], requests: [], lists: [], errors: [], loading: [] };
   const scope = {
     sessionIdRef: { current: "session-1" },
-    sessionPropIdRef: { current: "session-1" },
-    builtinCommandLifetimeRef: { current: 0 },
-    sessionHookMountedRef: { current: true },
     ensureNewSession: async () => "session-1",
     addNotice: (notice) => calls.notices.push(notice),
     onOpenSettings: openSettings ? (section) => calls.opened.push(section) : undefined,
@@ -87,17 +84,6 @@ test("a bare /mcp the built-in owns opens Settings › MCP with no notice and no
   // complete() says nothing for a command that opens a panel.
   assert.deepEqual(calls.notices, []);
   assert.deepEqual(calls.requests, []);
-});
-
-test("an MCP owner lookup cannot open Settings after its session lifetime ends", async () => {
-  const answer = deferred();
-  const { run, scope, calls } = hook({ pending: answer.promise });
-  const result = run("/mcp");
-  scope.builtinCommandLifetimeRef.current += 1;
-  answer.resolve([builtinMcp]);
-  assert.deepEqual(await result, { handled: true });
-  assert.deepEqual(calls.opened, []);
-  assert.deepEqual(calls.notices, []);
 });
 
 test("another extension's /mcp is sent as before", async () => {

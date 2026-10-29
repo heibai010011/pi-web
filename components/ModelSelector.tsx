@@ -9,8 +9,6 @@ export interface ModelSelectorOption {
   provider: string;
   modelId: string;
   name: string;
-  /** Optional modality marker; "image" options render with a generation badge. */
-  kind?: "image";
 }
 
 interface ModelSelectorProps {
@@ -356,7 +354,7 @@ export function ModelSelector({
                           onSave: () => saveDefault(option),
                         } : undefined}
                       >
-                        <OptionLabel label={option.name} kind={option.kind} />
+                        <OptionLabel label={option.name} />
                       </SelectorRow>
                     );
                   })}
@@ -370,10 +368,6 @@ export function ModelSelector({
   );
 }
 
-function OptionLabel({ label, kind }: { label: string; kind?: "image" }) {
-  const { t } = useI18n();
-  return <>
-    <span title={label} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
-    {kind === "image" && <span style={{ marginLeft: "auto", flexShrink: 0, padding: "1px 6px", borderRadius: 999, border: "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))", color: "var(--accent)", fontFamily: "var(--font-mono)", fontSize: 9, fontWeight: 600, lineHeight: 1.4 }}>{t("chat.imageGenBadge")}</span>}
-  </>;
+function OptionLabel({ label }: { label: string }) {
+  return <span title={label} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>;
 }

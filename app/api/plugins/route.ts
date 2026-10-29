@@ -29,6 +29,7 @@ import type {
 
 export const dynamic = "force-dynamic";
 
+type PluginAction = "install" | "remove" | "update" | "disable" | "enable";
 
 function emptyCounts(): PluginResourceCounts {
   return { extensions: 0, skills: 0, prompts: 0, themes: 0 };
@@ -429,29 +430,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
   }
 
-  let body: Record<string, unknown>;
   try {
-    const parsed: unknown = await req.json();
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return NextResponse.json({ error: "Body must be a JSON object" }, { status: 400 });
-    }
-    body = parsed as Record<string, unknown>;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-  if (typeof body.cwd !== "string" || !body.cwd.trim()) return NextResponse.json({ error: "cwd required" }, { status: 400 });
-  if (typeof body.action !== "string" || !["install", "remove", "update", "enable", "disable"].includes(body.action)) {
-    return NextResponse.json({ error: "Unsupported action" }, { status: 400 });
-  }
-  if (body.scope !== undefined && body.scope !== "global" && body.scope !== "project") {
-    return NextResponse.json({ error: "scope must be global or project" }, { status: 400 });
-  }
-  if (body.source !== undefined && typeof body.source !== "string") {
-    return NextResponse.json({ error: "source must be a string" }, { status: 400 });
-  }
-  const source = body.source?.trim();
-  if (body.packages === undefined && body.action !== "update" && !source) return NextResponse.json({ error: "source required" }, { status: 400 });
-  try {
+    const body = await req.json() as {
+      action?: PluginAction;
+      source?: string;
+      scope?: PluginScope;
+      packages?: unknown;
+      cwd?: string;
+    };
+    if (!body.cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
+    if (!body.action) return NextResponse.json({ error: "action required" }, { status: 400 });
     const allowedRoots = await getAllowedFileRoots();
     if (!isExistingFilePathAllowed(body.cwd, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
@@ -492,6 +480,7 @@ export async function POST(req: Request) {
       agentDir,
       settingsManager,
     });
+    const source = body.source?.trim();
     const local = scope === "project";
 
     if (body.action === "install") {

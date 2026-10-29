@@ -1,7 +1,6 @@
-import { fileSymlink } from "../../../lib/__fixtures__/mcp-test-platform.mjs";
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, beforeEach } from "node:test";
@@ -309,7 +308,7 @@ test("a project removal is undone only while the project is still trusted", asyn
   assert.equal(await readFile(projectPath, "utf8"), projectText);
 });
 
-test("a file that no longer parses, a server removed meanwhile, or a link outside are refused with the file untouched", async (t) => {
+test("a file that no longer parses, a server removed meanwhile, or a link outside are refused with the file untouched", async () => {
   await writeFile(globalPath, `{ "mcpServers": { "lint": { "env": { "T": '${SECRET}' } } } }`);
   const unparsable = await post({ action: "disable", scope: "global", name: "lint" });
   assert.deepEqual([unparsable.status, unparsable.body.reason, unparsable.body.path], [409, "unparsable", globalPath]);
@@ -321,16 +320,16 @@ test("a file that no longer parses, a server removed meanwhile, or a link outsid
   assert.deepEqual([missing.status, missing.body.reason, missing.body.name], [409, "server-missing", "gone"]);
   assert.equal((await post({ action: "disable", scope: "global", name: "gone" })).body.reason, "server-missing");
 
-  await t.test("an outside file link is refused", async (st) => {
+  if (process.platform !== "win32") {
     store.set(cwd, true);
     const target = join(outside, "mcp.json");
     await writeFile(target, projectText);
     await rm(projectPath);
-    if (!await fileSymlink(st, target, projectPath)) return;
+    await symlink(target, projectPath);
     const linked = await post({ action: "disable", scope: "project", name: "repo", cwd });
     assert.deepEqual([linked.status, linked.body.reason], [409, "link-outside"]);
     assert.equal(await readFile(target, "utf8"), projectText);
-  });
+  }
   assert.equal(await readFile(globalPath, "utf8"), globalText);
 });
 

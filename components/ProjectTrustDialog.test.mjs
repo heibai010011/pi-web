@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile as readFileRaw } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createJiti } from "jiti";
-
-// Source contracts are independent of the checkout's LF/CRLF line endings.
-const readFile = async (...args) => (await readFileRaw(...args)).replace(/\r\n/g, "\n");
 
 const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },

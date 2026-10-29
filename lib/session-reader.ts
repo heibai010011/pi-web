@@ -139,7 +139,7 @@ export function readLatestSessionEntryId(filePath: string | undefined): string |
   return undefined;
 }
 
-export function readSessionRelationEntries(filePath: string): SessionEntry[] {
+function readSessionRelationEntries(filePath: string): SessionEntry[] {
   const prefixEntries = parseSessionEntries(
     readBoundedLines(filePath, SESSION_RELATION_MAX_BYTES, SESSION_RELATION_MAX_LINES).slice(1),
   );

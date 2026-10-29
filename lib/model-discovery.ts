@@ -78,11 +78,9 @@ function modelFromValue(value: unknown): DiscoveredModel | null {
   }
   if (!isRecord(value)) return null;
 
-  const explicitId = cleanString(value.id) ?? cleanString(value.model);
-  const rawId = explicitId ?? cleanString(value.name);
+  const rawId = cleanString(value.id) ?? cleanString(value.model) ?? cleanString(value.name);
   if (!rawId) return null;
-  // Explicit IDs are opaque. Only Google's name-style resource needs stripping.
-  const id = !explicitId && rawId.startsWith("models/") ? rawId.slice("models/".length) : rawId;
+  const id = rawId.startsWith("models/") ? rawId.slice("models/".length) : rawId;
   if (!id) return null;
   const name = cleanString(value.display_name)
     ?? cleanString(value.displayName)
@@ -118,12 +116,6 @@ export function parseDiscoveredModels(value: unknown): DiscoveredModel[] {
 
 export function buildModelsListUrl(baseUrl: string, api: string): URL {
   const url = new URL(baseUrl.trim());
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("Model discovery requires an HTTP or HTTPS URL");
-  }
-  if (url.username || url.password) {
-    throw new Error("Model discovery URLs must not contain credentials; use provider authentication instead");
-  }
   const trimmedPath = url.pathname.replace(/\/+$/, "");
 
   if (!/\/models$/i.test(trimmedPath)) {
@@ -131,8 +123,6 @@ export function buildModelsListUrl(baseUrl: string, api: string): URL {
     if (api === "anthropic-messages" && !/\/v\d+(?:beta)?$/i.test(path)) path += "/v1";
     if (api === "google-generative-ai" && !/\/v\d+(?:beta)?$/i.test(path)) path += "/v1beta";
     url.pathname = `${path}/models`.replace(/\/+/g, "/");
-  } else {
-    url.pathname = trimmedPath;
   }
 
   if (api === "anthropic-messages" && !url.searchParams.has("limit")) {

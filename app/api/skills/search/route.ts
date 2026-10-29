@@ -17,19 +17,11 @@ interface SkillsApiSkill {
   installs?: number;
 }
 
-function normalizeApiSkill(value: unknown): SkillsApiSkill | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const raw = value as Record<string, unknown>;
-  return {
-    name: typeof raw.name === "string" ? raw.name : undefined,
-    source: typeof raw.source === "string" ? raw.source : undefined,
-    id: typeof raw.id === "string" ? raw.id : undefined,
-    installs: typeof raw.installs === "number" && Number.isFinite(raw.installs) && raw.installs > 0 ? raw.installs : 0,
-  };
+interface SkillsApiResponse {
+  skills?: SkillsApiSkill[];
 }
 
 function parseLimit(value: unknown): number {
-  if (typeof value !== "number" && (typeof value !== "string" || !value.trim())) return DEFAULT_LIMIT;
   const num = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(num)) return DEFAULT_LIMIT;
   return Math.min(MAX_LIMIT, Math.max(MIN_LIMIT, Math.floor(num)));
@@ -49,7 +41,7 @@ function parseSearchOutput(raw: string): SkillSearchResult[] {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     // package line: "owner/repo@skill  NNK installs"
-    const pkgMatch = line.match(/^([\w.\-]+\/[\w.\-@:]+)\s+([\d.,]+[KMB]?\s+installs?)$/);
+    const pkgMatch = line.match(/^([\w.\-]+\/[\w.\-@:]+)\s+([\d.,]+[KMB]?\s+installs)$/);
     if (pkgMatch) {
       const urlLine = lines[i + 1]?.trim().replace(/^└\s*/, "");
       results.push({
@@ -64,17 +56,11 @@ function parseSearchOutput(raw: string): SkillSearchResult[] {
 
 async function searchSkillsApi(query: string, limit: number): Promise<SkillSearchResult[]> {
   const url = `${SEARCH_API_BASE}/api/search?q=${encodeURIComponent(query)}&limit=${limit}`;
-  const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(20_000) });
+  const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`skills.sh search failed: HTTP ${res.status}`);
 
-  const data: unknown = await res.json();
-  if (!data || typeof data !== "object" || !Array.isArray((data as { skills?: unknown }).skills)) {
-    throw new Error("Invalid skills search response");
-  }
-  return ((data as { skills: unknown[] }).skills)
-    .map(normalizeApiSkill)
-    .filter((skill): skill is SkillsApiSkill => skill !== null)
-    .sort((a, b) => (b.installs ?? 0) - (a.installs ?? 0))
+  const data = (await res.json()) as SkillsApiResponse;
+  return (data.skills ?? [])
     .map((skill) => {
       const name = skill.name?.trim();
       const source = skill.source?.trim();
@@ -89,26 +75,25 @@ async function searchSkillsApi(query: string, limit: number): Promise<SkillSearc
       };
     })
     .filter((skill): skill is SkillSearchResult => skill !== null)
-    .slice(0, limit);
+    .sort((a, b) => parseInstallCount(b.installs) - parseInstallCount(a.installs));
 }
 
+function parseInstallCount(installs: string): number {
+  const match = installs.match(/^([\d.]+)([KMB])?\s+installs?$/);
+  if (!match) return 0;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return 0;
+  const multiplier = match[2] === "B" ? 1_000_000_000 : match[2] === "M" ? 1_000_000 : match[2] === "K" ? 1_000 : 1;
+  return value * multiplier;
+}
 
 // POST /api/skills/search  body: { query: string, limit?: number }
 export async function POST(req: Request) {
-  let body: Record<string, unknown>;
   try {
-    const parsed: unknown = await req.json();
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return NextResponse.json({ error: "Body must be a JSON object" }, { status: 400 });
-    }
-    body = parsed as Record<string, unknown>;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-  const { query, limit: rawLimit } = body;
-  if (typeof query !== "string" || !query.trim()) return NextResponse.json({ error: "query required" }, { status: 400 });
-  const limit = parseLimit(rawLimit);
-  try {
+    const { query, limit: rawLimit } = await req.json() as { query?: string; limit?: unknown };
+    if (!query?.trim()) return NextResponse.json({ error: "query required" }, { status: 400 });
+    const limit = parseLimit(rawLimit);
+
     try {
       const results = await searchSkillsApi(query.trim(), limit);
       return NextResponse.json({ results });
@@ -118,13 +103,13 @@ export async function POST(req: Request) {
         env: { ...process.env, FORCE_COLOR: "0" },
       });
 
-      const results = parseSearchOutput(`${stdout}\n${stderr}`).slice(0, limit);
+      const results = parseSearchOutput(stdout + stderr).slice(0, limit);
       return NextResponse.json({ results });
     }
   } catch (e: unknown) {
     const err = e as { stdout?: string; stderr?: string; message?: string };
-    const raw = `${err.stdout ?? ""}\n${err.stderr ?? ""}`;
-    const results = raw ? parseSearchOutput(raw).slice(0, limit) : [];
+    const raw = (err.stdout ?? "") + (err.stderr ?? "");
+    const results = raw ? parseSearchOutput(raw) : [];
     if (results.length > 0) return NextResponse.json({ results });
     return NextResponse.json({ error: err.message ?? String(e) }, { status: 500 });
   }

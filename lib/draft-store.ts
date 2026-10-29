@@ -1,4 +1,7 @@
-import { isBase64ImageWithinLimits } from "./image-attachments";
+import {
+  MAX_ATTACHED_IMAGES,
+  isBase64ImageWithinLimits,
+} from "./image-attachments";
 
 export interface ChatDraftImage {
   data: string;
@@ -11,20 +14,6 @@ export interface ChatDraft {
 }
 
 const drafts = new Map<string, ChatDraft>();
-
-type DraftRestorationHandler = (text: string, images?: ChatDraftImage[]) => ChatDraft;
-const restorationOwners = new Map<string, { handler: DraftRestorationHandler }>();
-
-// Restore-only routing, not a subscription to ordinary draft persistence. The
-// latest mounted registration explicitly owns a key; stale cleanup cannot
-// remove its replacement or revive an older consumer.
-export function registerDraftRestoration(key: string, handler: DraftRestorationHandler): () => void {
-  const owner = { handler };
-  restorationOwners.set(key, owner);
-  return () => {
-    if (restorationOwners.get(key) === owner) restorationOwners.delete(key);
-  };
-}
 
 function cloneDraft(draft: ChatDraft): ChatDraft {
   return {
@@ -68,6 +57,7 @@ export function mergeRestoredSubmissionDraft(
 ): ChatDraft {
   const images = [...(submittedImages ?? []), ...currentImages]
     .filter(isBase64ImageWithinLimits)
+    .slice(0, MAX_ATTACHED_IMAGES)
     .map(({ data, mimeType }) => ({ data, mimeType }));
 
   return {
@@ -81,8 +71,6 @@ export function restoreDraftSubmission(
   text: string,
   images?: ChatDraftImage[],
 ): ChatDraft {
-  const owner = restorationOwners.get(key);
-  if (owner) return cloneDraft(owner.handler(text, images));
   const current = getDraft(key) ?? { value: "", images: [] };
   const restored = mergeRestoredSubmissionDraft(
     text,

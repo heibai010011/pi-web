@@ -7,7 +7,6 @@ import { setTimeout as delay } from "node:timers/promises";
 import test, { after, beforeEach } from "node:test";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { createJiti } from "jiti";
-import { shellMarkerCommand } from "../../../../lib/__fixtures__/mcp-test-platform.mjs";
 import { approveSignIn, startFakeOAuthServer } from "../../../../lib/__fixtures__/mcp-oauth-server.mjs";
 
 // /api/mcp/sign-in connects and writes mcp-auth.json, so every case runs
@@ -69,7 +68,7 @@ beforeEach(async () => {
     },
   }, null, 2)}\n`);
   await writeFile(projectPath, `${JSON.stringify({
-    mcpServers: { repo: { url: fake.url, headers: { "X-Probe": shellMarkerCommand(marker, "probe") } } },
+    mcpServers: { repo: { url: fake.url, headers: { "X-Probe": `!touch ${marker} && echo probe` } } },
   }, null, 2)}\n`);
   store.set(cwd, null);
 });
