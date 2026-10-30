@@ -368,8 +368,23 @@ interface ProjectFolderTree {
   byId: Map<string, SessionUiFolder>;
 }
 
+/**
+ * Whether a stored folder's project is this group's. Windows paths are
+ * case-insensitive: the old sidebar saved the picked folder as `C:\Users\…`
+ * while a session reports `c:\users\…`, and its folders must still show in
+ * that project's group. Other keys stay exact (Linux and macOS paths are case
+ * sensitive, and there two projects may differ only by case).
+ */
+function sameProjectKey(folderProjectKey: string, projectKey: string): boolean {
+  if (folderProjectKey === projectKey) return true;
+  const windowsPath = /^[A-Za-z]:[\\/]/;
+  return windowsPath.test(folderProjectKey)
+    && windowsPath.test(projectKey)
+    && folderProjectKey.toLowerCase() === projectKey.toLowerCase();
+}
+
 function projectFolderTree(folders: readonly SessionUiFolder[], projectKey: string): ProjectFolderTree {
-  const mine = folders.filter((folder) => folder.projectKey === projectKey);
+  const mine = folders.filter((folder) => sameProjectKey(folder.projectKey, projectKey));
   const byId = new Map(mine.map((folder) => [folder.id, folder]));
   const childrenOf = new Map<string, SessionUiFolder[]>();
   const roots: SessionUiFolder[] = [];

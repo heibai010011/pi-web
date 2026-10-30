@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import { migrateLegacySessionOrg } from "@/lib/session-org-migration";
 import {
   readSessionUiState,
   SessionUiStateLockedError,
@@ -31,6 +32,15 @@ function refusal(status: number, reason: SessionUiStateRefusalReason, error: str
 
 // GET /api/sessions/ui-state
 export async function GET() {
+  // Before the new state is read: the folders the old sidebar kept in
+  // `session-org.json` (0.11 and earlier) become folders here once. Same
+  // machine only: the file is this profile's. A failure leaves it for the next
+  // load and never hides pins, archive or the project order.
+  try {
+    await migrateLegacySessionOrg();
+  } catch (error) {
+    console.warn(`[pi-web] legacy session folders were not imported: ${error instanceof Error ? error.message : String(error)}`);
+  }
   return NextResponse.json({ state: readSessionUiState() } satisfies SessionUiStateResponse, { headers: NO_STORE });
 }
 

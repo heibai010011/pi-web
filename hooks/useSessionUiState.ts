@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { importLegacyLocalSessionOrg } from "@/lib/legacy-local-folders";
 import {
   applySessionUiStateRequest,
   emptySessionUiState,
@@ -165,6 +166,19 @@ export function useSessionUiState(): SessionUiStateApi {
     writeChainRef.current = result;
     return result;
   }, [load, publish]);
+
+  // The browser's old folder records (0.11 and earlier) arrive after the new
+  // state has loaded: the server imported `session-org.json`, this adds what
+  // only this browser held. Once per page; a refused write keeps the records
+  // for the next load.
+  const legacyLocalFoldersRef = useRef(false);
+  useEffect(() => {
+    if (!synced || legacyLocalFoldersRef.current) return;
+    legacyLocalFoldersRef.current = true;
+    void importLegacyLocalSessionOrg(localStateRef.current, apply).catch((error) => {
+      console.warn(`[pi-web] legacy browser session folders were not imported: ${errorMessage(error)}`);
+    });
+  }, [synced, apply]);
 
   const snapshot = useCallback(
     (ids: readonly string[]) => snapshotSessionUiFlags(localStateRef.current, ids),
