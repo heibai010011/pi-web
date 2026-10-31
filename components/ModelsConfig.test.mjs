@@ -48,6 +48,16 @@ test("a model switches off adaptive thinking its provider turns on with an expli
   assert.equal(setCompatFlag(plain, "forceAdaptiveThinking", false), plain);
 });
 
+test("switching requiresToolResultName off removes the override unless the provider turns it on", () => {
+  const on = setCompatFlag({ id: "gemini-4-argon-high" }, "requiresToolResultName", true);
+  assert.deepEqual(on, { id: "gemini-4-argon-high", compat: { requiresToolResultName: true } });
+  assert.deepEqual(setCompatFlag(on, "requiresToolResultName", false), { id: "gemini-4-argon-high", compat: undefined });
+  assert.deepEqual(
+    setCompatFlag({ id: "gemini-4-argon-high" }, "requiresToolResultName", false, true),
+    { id: "gemini-4-argon-high", compat: { requiresToolResultName: false } },
+  );
+});
+
 test("editing a header preserves row order and stable identities", () => {
   const rows = [
     { id: 10, name: "X-First", value: "one" },
