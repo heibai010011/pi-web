@@ -1314,56 +1314,31 @@ function ModelDetail({
               </Field>
             )}
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              <SectionTitle>{t("models.compatibility")}</SectionTitle>
-              {model.reasoning && (
-                <>
-                  <Check
-                    label={t("models.deepSeekThinkingCompat")}
-                    checked={hasDeepseekCompat(model)}
-                    onChange={(v) => onChange(setDeepseekCompat(model, v))}
-                  />
-                  <Check
-                    label={t("models.developerRole")}
-                    checked={effectiveCompat(provider, model)["supportsDeveloperRole"] !== false}
-                    onChange={(v) => onChange(setCompatBool(model, "supportsDeveloperRole", v))}
-                  />
-                  {(model.api ?? provider.api ?? "openai-completions") === "openai-completions" && (
+            {model.reasoning && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <SectionTitle>{t("models.compatibility")}</SectionTitle>
+                <Check
+                  label={t("models.deepSeekThinkingCompat")}
+                  checked={hasDeepseekCompat(model)}
+                  onChange={(v) => onChange(setDeepseekCompat(model, v))}
+                />
+                <Check
+                  label={t("models.developerRole")}
+                  checked={effectiveCompat(provider, model)["supportsDeveloperRole"] !== false}
+                  onChange={(v) => onChange(setCompatBool(model, "supportsDeveloperRole", v))}
+                />
+                {(model.api ?? provider.api) === "anthropic-messages" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                     <Check
-                      label={t("models.reasoningEffort")}
-                      checked={effectiveCompat(provider, model)["supportsReasoningEffort"] !== false}
-                      onChange={(v) => onChange(setCompatBool(model, "supportsReasoningEffort", v))}
+                      label={t("models.adaptiveThinking")}
+                      checked={effectiveCompat(provider, model)["forceAdaptiveThinking"] === true}
+                      onChange={(v) => onChange(setCompatFlag(model, "forceAdaptiveThinking", v, provider.compat?.["forceAdaptiveThinking"] === true))}
                     />
-                  )}
-                </>
-              )}
-              {(model.api ?? provider.api ?? "openai-completions") === "openai-completions" && (
-                <>
-                  <Check
-                    label={t("models.requiresToolResultName")}
-                    checked={effectiveCompat(provider, model)["requiresToolResultName"] === true}
-                    onChange={(v) => onChange(setCompatFlag(model, "requiresToolResultName", v, provider.compat?.["requiresToolResultName"] === true))}
-                  />
-                  <Check
-                    label={t("models.supportsStore")}
-                    checked={effectiveCompat(provider, model)["supportsStore"] !== false}
-                    onChange={(v) => onChange(setCompatBool(model, "supportsStore", v))}
-                  />
-                </>
-              )}
-              {model.reasoning && (model.api ?? provider.api) === "anthropic-messages" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                  <Check
-                    label={t("models.adaptiveThinking")}
-                    checked={effectiveCompat(provider, model)["forceAdaptiveThinking"] === true}
-                    onChange={(v) => onChange(setCompatFlag(model, "forceAdaptiveThinking", v, provider.compat?.["forceAdaptiveThinking"] === true))}
-                  />
-                  <code style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", paddingLeft: 19 }}>
-                    compat.forceAdaptiveThinking
-                  </code>
-                </div>
-              )}
-              {model.reasoning && (
+                    <code style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", paddingLeft: 19 }}>
+                      compat.forceAdaptiveThinking
+                    </code>
+                  </div>
+                )}
                 <div style={{ marginTop: 4 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
                     <SectionTitle>{t("models.thinkingLevelMap")}</SectionTitle>
@@ -1382,8 +1357,8 @@ function ModelDetail({
                     onChange={(v) => set("thinkingLevelMap", v)}
                   />
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
         )}
       </section>
