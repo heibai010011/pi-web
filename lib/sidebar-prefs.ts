@@ -198,7 +198,8 @@ export function saveFolderCollapsed(
   }
 }
 
-export function loadPinnedCollapsed(storage: StorageLike | null = getBrowserStorage()): boolean {  if (!storage) return false;
+export function loadPinnedCollapsed(storage: StorageLike | null = getBrowserStorage()): boolean {
+  if (!storage) return false;
   try {
     return storage.getItem(PINNED_COLLAPSED_STORAGE_KEY) === "true";
   } catch {

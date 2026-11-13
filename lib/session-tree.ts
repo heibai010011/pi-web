@@ -17,7 +17,7 @@
  * rest; in each band the projects without a place come first.
  */
 
-import { listSessionFamilies, type SessionFamily } from "./session-family";
+import { getSessionFamily, listSessionFamilies, type SessionFamily } from "./session-family";
 import {
   FOLDER_UNGROUPED,
   storedProjectName,
@@ -1106,21 +1106,92 @@ export function getVisibleRowIndices(
  * now scrolled to `scrollTop`: centred when it is partly or wholly out of
  * view, null when it is already in view (or there is no such row). With
  * `block` "start" the row goes to the top unless it is there already (the
- * browser clamps a list too short to put it there).
+ * browser clamps a list too short to put it there). With "nearest" a row
+ * partly in view moves only as far as it takes to show it whole (its top
+ * first when it is taller than the viewport): a click on a row cut by an
+ * edge never moves it from under the pointer by half the list.
  */
 export function revealScrollTop(
   offsets: readonly number[],
   index: number,
   scrollTop: number,
   viewportHeight: number,
-  block?: "start",
+  block?: "start" | "nearest",
 ): number | null {
   if (!Number.isInteger(index) || index < 0 || index >= offsets.length - 1) return null;
   const top = offsets[index];
   const bottom = offsets[index + 1];
   if (block === "start") return top === scrollTop ? null : top;
   if (top >= scrollTop && bottom <= scrollTop + viewportHeight) return null;
+  if (block === "nearest" && bottom > scrollTop && top < scrollTop + viewportHeight) {
+    return top < scrollTop || bottom - top > viewportHeight ? top : bottom - viewportHeight;
+  }
   return Math.max(0, top - Math.max(0, (viewportHeight - (bottom - top)) / 2));
+}
+
+/** Where the main tree shows a session's row (locateSessionRow()). */
+export interface SessionRowLocation {
+  rowKey: string;
+  projectKey: string;
+  /** The pinned section is folded over the row. */
+  unfoldPinned: boolean;
+  /** The row's group is folded by an explicit choice. */
+  unfoldGroup: boolean;
+}
+
+/**
+ * Where the main tree shows a session's row: its family's row in the pinned
+ * section or in its project's group, keyed as `buildSessionTree()` keys it
+ * (a subagent or a side chat is its root's row), and what hides it now: the
+ * pinned section folded, or the group folded on purpose. A group closed
+ * only because its project is not the current one needs nothing: opening
+ * a session makes its project current. Null when the main tree has no row
+ * for it: not in the list (a fresh session not saved yet) or archived.
+ */
+export function locateSessionRow(
+  input: Pick<SessionTreeInput, "sessions" | "uiState" | "runningIds" | "groupExpansion" | "pinnedCollapsed">,
+  sessionId: string,
+): SessionRowLocation | null {
+  const family = getSessionFamily(input.sessions, sessionId);
+  if (!family || isFamilyArchived(family, input.uiState, input.runningIds)) return null;
+  const projectKey = familyProjectKey(family);
+  if (isFamilyPinned(family, input.uiState, input.runningIds)) {
+    return { rowKey: `session:pinned:${family.root.id}`, projectKey, unfoldPinned: input.pinnedCollapsed, unfoldGroup: false };
+  }
+  const unfoldGroup = Object.hasOwn(input.groupExpansion, projectKey) && input.groupExpansion[projectKey] === false;
+  return { rowKey: `session:group:${family.root.id}`, projectKey, unfoldPinned: false, unfoldGroup };
+}
+
+/**
+ * Folded folder ids containing `sessionId`'s family in its project group (root
+ * folder to immediate parent), so revealing an open session can unfold them.
+ */
+export function folderIdsContainingSession(
+  input: Pick<SessionTreeInput, "sessions" | "uiState" | "runningIds" | "folderCollapsed">,
+  sessionId: string,
+): string[] {
+  const folded = input.folderCollapsed;
+  if (!folded || folded.size === 0) return [];
+  const folders = input.uiState.folders;
+  if (!folders || folders.length === 0) return [];
+  const family = getSessionFamily(input.sessions, sessionId);
+  if (!family || isFamilyArchived(family, input.uiState, input.runningIds)) return [];
+  if (isFamilyPinned(family, input.uiState, input.runningIds)) return [];
+  const folderTree = projectFolderTree(folders, familyProjectKey(family));
+  if (folderTree.folders.length === 0) return [];
+  const sessionsById = new Map(input.sessions.map((session) => [session.id, session]));
+  const folderId = effectiveFolderId(family, sessionsById, input.uiState.folderAssignments ?? {}, folderTree);
+  if (!folderId) return [];
+  const toUnfold: string[] = [];
+  const seen = new Set<string>();
+  let current: string | undefined = folderId;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (folded.has(current)) toUnfold.push(current);
+    const folder = folderTree.byId.get(current);
+    current = folder?.parentId && folderTree.byId.has(folder.parentId) ? folder.parentId : undefined;
+  }
+  return toUnfold;
 }
 
 /** A reveal request is dropped once its row has missed this many rows updates, or this long after it was made. */

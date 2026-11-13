@@ -14,7 +14,7 @@ import {
   type SessionUiStateRequest,
 } from "./session-ui-state-shared";
 
-// The sidebar's pins, archive, project order and project names
+// The sidebar's pins, archive, project order, project names and read times
 // (`lib/session-ui-state-shared.ts` has the rules) in `pi-web-session-state.json`
 // beside pi's own files. It holds what the user chose, so unlike the session
 // index it is never rebuilt: writes are serialized in-process, locked against
@@ -23,7 +23,7 @@ import {
 
 const MAX_BYTES = 4 * 1024 * 1024;
 // `__proto__` is never copied: assigning it would set the object's prototype instead.
-const KNOWN_KEYS = new Set(["version", "revision", "sessions", "projects", "projectOrder", "projectNames", "folders", "folderAssignments", "__proto__"]);
+const KNOWN_KEYS = new Set(["version", "revision", "sessions", "projects", "projectOrder", "projectNames", "folders", "folderAssignments", "readAt", "__proto__"]);
 
 // Route handlers are bundled separately and hot reload re-evaluates modules; globalThis keeps one queue per process.
 const QUEUE_KEY: symbol = Symbol.for("pi-web:session-ui-state-write-queue");
@@ -230,6 +230,7 @@ function editState(
         ...(next.folderAssignments && Object.keys(next.folderAssignments).length > 0
           ? { folderAssignments: next.folderAssignments }
           : {}),
+        ...(next.readAt && Object.keys(next.readAt).length > 0 ? { readAt: next.readAt } : {}),
         ...extras,
       };
       writePrivateFileAtomicSync(path, JSON.stringify(document, null, 2) + "\n");
@@ -261,30 +262,33 @@ export function updateSessionUiState(request: SessionUiStateRequest, path?: stri
   return editState(target, (state) => applySessionUiStateRequest(state, request, Date.now()));
 }
 
-/** Removes those session entries (pin/archive and folder assignment); no-op (no write) if none present. */
+/** Removes those sessions' entries (pin/archive, folder assignment, read times); no-op (no write) if none present. */
 export async function forgetSessionUiState(ids: Iterable<string>, path?: string): Promise<void> {
   const target = path ?? getSessionUiStatePath();
   const wanted = [...new Set(ids)];
   if (wanted.length === 0) return;
-  const hasAssignment = (state: SessionUiState, id: string) => Boolean(state.folderAssignments
-    && Object.prototype.hasOwnProperty.call(state.folderAssignments, id));
-  const has = (state: SessionUiState) => wanted.some((id) => Object.prototype.hasOwnProperty.call(state.sessions, id) || hasAssignment(state, id));
-  // Deleting a session must not lock or create anything when it had no pin, archive time or folder.
+  const hasOwn = (record: object | undefined, id: string) => record !== undefined && Object.prototype.hasOwnProperty.call(record, id);
+  const has = (state: SessionUiState) => wanted.some((id) => hasOwn(state.sessions, id) || hasOwn(state.folderAssignments, id) || hasOwn(state.readAt, id));
+  // Deleting a session must not lock or create anything when it had no pin, archive, folder or read time.
   // A file that cannot be read throws here: the locked read could not do better.
   if (!has(loadState(target))) return;
   await editState(target, (state) => {
     if (!has(state)) return { state, changed: false };
     const sessions = { ...state.sessions };
     for (const id of wanted) delete sessions[id];
-    let folderAssignments = state.folderAssignments;
-    if (folderAssignments) {
-      const nextAssignments = { ...folderAssignments };
-      for (const id of wanted) delete nextAssignments[id];
-      folderAssignments = Object.keys(nextAssignments).length > 0 ? nextAssignments : undefined;
-    }
     const updated: SessionUiState = { ...state, sessions };
-    if (folderAssignments) updated.folderAssignments = folderAssignments;
-    else delete updated.folderAssignments;
+    if (state.folderAssignments) {
+      const nextAssignments = { ...state.folderAssignments };
+      for (const id of wanted) delete nextAssignments[id];
+      if (Object.keys(nextAssignments).length > 0) updated.folderAssignments = nextAssignments;
+      else delete updated.folderAssignments;
+    }
+    if (state.readAt) {
+      const nextReadAt = { ...state.readAt };
+      for (const id of wanted) delete nextReadAt[id];
+      if (Object.keys(nextReadAt).length > 0) updated.readAt = nextReadAt;
+      else delete updated.readAt;
+    }
     return { state: updated, changed: true };
   });
 }
