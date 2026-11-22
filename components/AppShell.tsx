@@ -907,14 +907,27 @@ export function AppShell() {
     const newProject = projectKey ?? projectRoot ?? cwd;
     const currentProject = activeProjectKeyRef.current
       ?? (selectedSession ? workspaceKeyOf(selectedSession) : null);
-    activeProjectKeyRef.current = newProject;
 
     // Keep the project identity in sync during the initial URL restore without
     // remounting the just-created or restored chat.
     if (suppressCwdBumpRef.current) {
+      activeProjectKeyRef.current = newProject;
       suppressCwdBumpRef.current = false;
       return;
     }
+    // Selecting a session in another folder (such as a missing-cwd fork) sets
+    // selectedSession before the sidebar's session list or worktree listing
+    // hydrates that folder's projectKey. The sidebar then reports the raw cwd
+    // as a fallback key, which differs from a case-folded Windows projectKey or
+    // a git worktree's repo key. Echoing the open session's own cwd is not a
+    // project switch; keep the session's server-computed projectKey when present.
+    if (selectedSession && selectedSession.cwd === cwd) {
+      activeProjectKeyRef.current = selectedSession.projectKey
+        ? workspaceKeyOf(selectedSession)
+        : newProject;
+      return;
+    }
+    activeProjectKeyRef.current = newProject;
     // The server may hydrate a normalized key after a custom cwd is already
     // active. Updating identity for the exact same cwd is not a user switch.
     if (currentFreshCwd === cwd && currentProject !== newProject) return;

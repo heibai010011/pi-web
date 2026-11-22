@@ -540,3 +540,90 @@ test("a new session puts the caret in the fresh composer on desktop only (#1313)
   context.navigate.handleNewSession("kb-2", "/p1");
   assert.equal(frames.length, 0);
 });
+
+test("forking into another folder keeps the forked session open while sidebar projectKey hydrates (#1699)", async (t) => {
+  const callbacks = [
+    callbackBody("restoreWorkspaceContext", "handleCwdChange"),
+    callbackBody("handleCwdChange", "handleSelectSession"),
+    callbackBody("handleSelectSession", "handleNewSession"),
+    callbackBody("handleSessionForked", "handleInitialRestoreDone"),
+  ].join("\n");
+
+  const cases = [
+    {
+      label: "Windows case-folded target",
+      forked: {
+        id: "forked-win",
+        cwd: "C:\\Temp\\Moved",
+        projectRoot: "C:\\Temp\\Moved",
+        projectKey: "c:\\temp\\moved",
+      },
+    },
+    {
+      label: "Git worktree target",
+      forked: {
+        id: "forked-wt",
+        cwd: "/work/wt-feat",
+        projectRoot: "/work/repo",
+        projectKey: "/work/repo",
+      },
+    },
+  ];
+
+  for (const { label, forked } of cases) {
+    await t.test(label, () => {
+      const urls = [];
+      const context = vm.createContext({
+        ...draftStore,
+        crypto: globalThis.crypto,
+        URLSearchParams,
+        window: { location: { pathname: "/", search: "?session=missing-src" } },
+        router: { replace: (url) => urls.push(url) },
+        fetch: () => new Promise(() => {}),
+        getLastOpenSession: () => null,
+        clearLastOpen() {},
+        workspaceKeyOf: (value) => value.projectKey ?? value.projectRoot ?? value.cwd,
+        useCallback: (callback) => callback,
+        hydrateSelectedSession() {},
+        changeFileWorkspace() {},
+        activeNewSessionDraftKeyRef: { current: null },
+        activeProjectKeyRef: { current: "c:\\temp\\gone" },
+        workspaceRestoreTokenRef: { current: 0 },
+        suppressCwdBumpRef: { current: false },
+        skipWorkspaceRestoreRef: { current: false },
+        branchLeafChangeFnRef: { current: null },
+        isMobile: false,
+        activeCwd: "C:\\Temp\\Gone",
+        newSessionCwd: null,
+        newSessionDraftId: "initial",
+        selectedSession: { id: "missing-src", cwd: "C:\\Temp\\Gone", projectKey: "c:\\temp\\gone" },
+        sessionCatalog: [],
+        sessionKey: 0,
+      });
+      context.invalidateWorkspaceRestore = () => context.workspaceRestoreTokenRef.current++;
+      for (const [setter] of callbacks.matchAll(/\bset[A-Z]\w*(?=\()/g)) {
+        const state = setter[3].toLowerCase() + setter.slice(4);
+        context[setter] = (value) => {
+          context[state] = typeof value === "function" ? value(context[state]) : value;
+        };
+      }
+      vm.runInContext(stripTypeScriptTypes(`${callbacks}
+        globalThis.navigate = { handleSessionForked, handleCwdChange };
+      `), context);
+
+      context.navigate.handleSessionForked(forked.id, forked);
+      // Sidebar mirrors selectedCwd before /api/sessions or /api/worktrees hydrates its key.
+      context.navigate.handleCwdChange(forked.cwd, forked.cwd, forked.cwd);
+      assert.equal(context.selectedSession?.id, forked.id);
+      assert.equal(context.activeCwd, forked.cwd);
+      assert.equal(context.activeProjectKeyRef.current, forked.projectKey);
+
+      // Server hydration arrives later with the canonical projectKey.
+      context.navigate.handleCwdChange(forked.cwd, forked.projectRoot, forked.projectKey);
+      assert.equal(context.selectedSession?.id, forked.id);
+      assert.equal(context.activeCwd, forked.cwd);
+      assert.equal(context.activeProjectKeyRef.current, forked.projectKey);
+      assert.deepEqual(urls, [`?session=${forked.id}`]);
+    });
+  }
+});
